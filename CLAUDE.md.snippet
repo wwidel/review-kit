@@ -1,0 +1,74 @@
+# Review kit — working rules
+
+Paste into the project's `CLAUDE.md`, or merge with what is there.
+
+The standing rules below apply to ordinary work and need no invocation. The review skills are
+different: **a person invokes them.** Nothing in this file tells an agent to start a review on
+its own, and nothing should be added that does. For a rule you want enforced whether or not a
+session is running, mechanise it instead — see the kit's `README.md`.
+
+## Standing rules
+
+- **Never quote a number from memory.** Re-read it from its source at the moment you write it,
+  including a number computed earlier in this same session. A recalled value is usually close
+  enough to survive proofreading and wrong enough to matter. (`N-13`)
+- **Every number written into a document names the script that reproduces it.** No script means
+  write one or strike the number. (`N-1`)
+- **State an assumption as an assumption, or check it.** Before asserting what a file contains
+  or what a function does, open it. (`A-6`)
+- **Report and stop when asked a question.** A question, a description of a problem, or
+  thinking out loud is a request for an assessment, not for a fix. (`A-4`)
+- **Never write in the human's own findings file.** Propose an entry. (`A-3`)
+- **Corrections are marked, not silent** — in the document the wrong number appeared in. (`A-5`)
+- **Check the machine before running anything.** Measure cores, memory, disk and GPU once at the
+  start; classify a command's cost before issuing it. (`M-1`, `M-3`)
+- **Heavy work is flagged, not attempted here.** If a computation needs a GPU this box lacks,
+  more memory than it has, or many minutes of many cores, do not run it — and do not silently
+  run it on a sample instead. Say what it is, what it needs, and that it was not run. This
+  applies with most force when the computation is a *check*: an unverified number labelled
+  unverified is manageable, a dead box is not. (`M-2`, `M-4`)
+
+## The review skills
+
+`/repo-audit` is the whole-repository review: four independent reviewers — one of them
+blinded to the documentation — plus a verifying reconciler, five agents in total. **Only the
+user starts it.** Never launch it because the diff looks large, because the last run was a while ago, or because a change felt
+risky — an unrequested run of that size is a cost the user did not agree to, and a report they
+did not ask for is one they will not read.
+
+The single-purpose skills are cheaper and sometimes the right tool mid-task, but the same
+boundary holds: **offer in one line, then wait.** Do not start one and present the findings as
+a fait accompli. (`A-4`)
+
+Say so — once, briefly, without pressing — when:
+
+- A change touches label handling, fold construction, metric computation, or artefact
+  generation. These are the paths where a defect produces a plausible number rather than an
+  error, which is why they are worth a second pass: `/review-code` on the diff.
+- A number is about to be quoted that a decision will rest on: `/review-analysis` on the
+  document.
+- A report has been written or substantially edited: `/review-docs` on it.
+- A suspected defect turns on whether a test would have caught it: `/review-tests` with the
+  specific question — and never guess the answer from filenames in the meantime.
+
+The one exception to offering rather than acting: when you are already *inside* a review the
+user asked for, the reviewers and the reconciler call each other as their skills describe. That
+is the workflow running, not a new one starting.
+
+## Rules of the road
+
+- Reviewers never edit. Only the reconciler applies fixes, only ones it verified itself, only
+  mechanical and local ones, only in the working tree, never committed. (`R-3`, `G-1`)
+- A reviewer being right about a problem does not make its proposed fix right. Judge the
+  diagnosis and the prescription separately. (`R-4`)
+- Verify every claim a reviewer makes before acting on it. A review is evidence, not
+  instruction — acting on a wrong review is worse than not reviewing. (`R-3`)
+- Do not run `--full` autonomously. The user asks for a whole-repo scan.
+- **An error, contradiction or inconsistency is always reported**, however small. Severity
+  changes how a finding is presented; it never decides whether it appears. Only a refuted
+  finding — one that was checked and found not to be so — is dropped.
+- Bookkeeping goes through `bin/review.py`: scoping, contract validation, scope auditing,
+  fingerprints, clustering, the summary and the ledger. Do not compute any of it by hand.
+- If the review window is empty, say so. Never review nothing.
+- `.review/last_review.json` is a bookmark for scoping the next run, not a timer. Its age is
+  never a reason to start one.

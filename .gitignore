@@ -1,0 +1,11 @@
+# Written by the hook when a review runs with the kit's own directory as the access root.
+# Review state belongs in the repository under review, never here.
+.review/
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Copied into a repo by install.py --with-rules; it is the repo's file, not the kit's.
+REVIEW-RULES.md
