@@ -42,7 +42,9 @@ your own output.
     "numbers_deferred": 0
   },
   "not_reviewed": [
-    "src/pkg/legacy/ — 2400 lines, out of scope window, not read"
+    "src/pkg/legacy/tuning.py — out of the scope window, not read",
+    { "path": "src/pkg/legacy/sweep.py", "reason": "out of the scope window, not read" },
+    "reports/Q3.pptx — opaque; any figures in it are unchecked"
   ],
   "findings": [
     {
@@ -202,6 +204,13 @@ third of its scope must say so rather than producing a clean-looking report.
 Use whichever keys fit your remit — `functions_scanned`, `scripts_scanned`, `blocks_scanned`,
 `opaque_blocks`, `opaque_weighted`, `numbers_checked`, `numbers_deferred`, `tests_collected`.
 The set is open; what matters is that a count always arrives with what it is a count *of*.
+
+**One entry per file, and each entry leads with the path.** Either `"path/to/file.py — why"`
+or `{"path": "...", "reason": "..."}`. A directory does not declare the files under it, and
+prose that merely mentions a filename does not declare it either: `validate` checks each
+unread in-scope path against the heads of these entries and fails the file otherwise. The rule
+is strict because the loose version let "I looked at the legacy package, honest" stand in for
+coverage of eleven files.
 
 Be honest in `not_reviewed`, and put anything you could not check for budget reasons there too,
 naming the command and what it would need. An admitted gap is useful; a silent one poisons the

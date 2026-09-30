@@ -37,18 +37,35 @@ fourth opinion nobody asked for.
 
 Run the tooling. Do not compute any of this by hand.
 
+**Shield first, before anything is scoped.** `REVIEW-SUMMARY.md` is a real committed file, so
+`grep -r` and `rg` find it, and a reviewer that reads last run's summary is no longer
+independent — which has happened twice. Shielding *after* `scope` is worse than not shielding:
+the manifest then lists a file the pipeline has removed, and every reviewer is charged a
+SCOPE GAP for failing to read it.
+
+**Derive the store; never hard-code `.review/`.** A `--minimal` install writes nothing into
+the repository, so a literal `.review/` does not exist there and `mkdir -p .review/...` would
+put this run's findings inside the repo being audited — where a reviewer's `grep -r` reaches them, and
+contrary to what that install promised.
+
 ```bash
-RUN=$(date -u +%Y-%m-%dT%H-%M-%SZ); D=.review/runs/$RUN; mkdir -p $D
+STORE=$(python3 <review-kit>/bin/review.py store --repo .)
+RUN=$(date -u +%Y-%m-%dT%H-%M-%SZ); D=$STORE/runs/$RUN; mkdir -p $D
+python3 <review-kit>/bin/review.py shield --repo .
 python3 <review-kit>/bin/review.py scope --repo . --out $D --list [--since <ref>]
 python3 <review-kit>/bin/review.py machine --out $D/machine.json
 python3 <review-kit>/bin/review.py characterize --repo . --out $D/repo_profile.json
 python3 <review-kit>/bin/review.py probe --manifest $D/manifest.json --out $D/probes.json
-cat .review/last_review.json 2>/dev/null || echo "no previous review"
+cat $STORE/last_review.json 2>/dev/null || echo "no previous review"
 ```
 
-`scope` writes `manifest.json` in **two tiers**. The *review tier* is code and prose, read in
-full. The *reference tier* is data files and anything over ~500 lines: each is described —
-size, sha256, columns, first row — and **queried with a script, never read**. On a repository
+`scope` writes `manifest.json` in **three tiers**. The *review tier* is read in full: source,
+Markdown, and anything else under the threshold. The *reference tier* is tabular data at any
+size plus any other file over ~500 lines that is neither source nor Markdown; each is
+described — size, sha256, columns, first row — and **queried with a script, never read**. The
+*opaque tier* is listed only. Source and Markdown are never demoted however long they run,
+because the longest script and the longest README are where a defect hides; `scope` prints
+the oversized ones as a note instead. On a repository
 whose committed CSVs run to 274,000 lines against 3,700 lines of code, the difference is the
 whole token budget. It exits non-zero on an empty scope, so you cannot review nothing by
 accident.
@@ -60,9 +77,10 @@ functions with identical bodies. Without it, every reviewer runs the same greps 
 grep's output lands in four separate contexts. Hand `probes.json` to all four.
 
 Be clear with them about what a probe is: **a place to look, never a finding.** The table is
-deliberately over-inclusive — on this repository it returns 61 magic-number hits, most of them
-fine. A reviewer must never file a finding because a probe matched, and must never file one
-without having read the code around it.
+deliberately over-inclusive — read this run's own counts from `$D/probes.json` rather than
+quoting a figure from anywhere else; most of the hits will be fine. A reviewer must never
+file a finding because a probe matched, and must never file one without having read the
+code around it.
 
 `characterize` reports signals about the repository's posture — tests, linter config, CI,
 commit recency. **Treat its verdict as a hint and nothing more.** The default assumption for
@@ -72,7 +90,7 @@ severities for the same hygiene item, but the same severity for the same defect.
 
 ### Choosing the window
 
-- **Default**: everything changed since `.review/last_review.json`, plus one rotating slice of
+- **Default**: everything changed since `$STORE/last_review.json`, plus one rotating slice of
   the stable core. Without the rotation, settled code is never re-read and the interesting new
   code gets a thin pass as the repo grows; with it, the core is covered over several cycles.
   The marker records where the last review got to so this one can be scoped against it — it is
@@ -102,12 +120,6 @@ state, not a re-run of the project. (`M-2`, `M-4`)
 
 ## Stage 1 — Four reviewers, in parallel, blind to each other
 
-**Shield the previous run's conclusions first.**
-
-```bash
-python3 <review-kit>/bin/review.py shield --repo .
-```
-
 `REVIEW-SUMMARY.md` is a real, committed file, so `grep -r` and `rg` find it — and a reviewer
 that reads last run's summary is no longer independent, which is the single property this whole
 design buys. It has happened twice: a reviewer and a reconciler each swept the repository and
@@ -118,7 +130,6 @@ before shielding again, so the file is never orphaned.
 
 (The rest of the store is already outside the repo: `.review` is a symlink, and `grep -r` and
 `rg` skip symlinked directories. Only the summary needs moving — unless the store was installed
-with `--in-repo`, in which case say so in the handover, because reviewers can then reach
 everything.)
 
 Spawn all four in **one message** so they run concurrently, each in its own fresh context.
@@ -131,7 +142,7 @@ each erosion silently converts this into an ordinary single-agent review:
 
 - **No reviewer sees another's output, prompt, or existence.** Do not tell them they are part of
   an audit, do not mention what the others cover, and do not pass one's findings to another.
-- **Each writes to its own file** in `.review/runs/$RUN/` and prints only a one-line summary.
+- **Each writes to its own file** in `$STORE/runs/$RUN/` and prints only a one-line summary.
 - **No reviewer edits anything.** Concurrent edits would invalidate the line numbers the others
   are citing at that moment, and the reconciler needs an unmodified tree to verify against.
 - **Subagents do not inherit skills.** Each prompt must name the skill file by path and say to
@@ -148,7 +159,7 @@ The prompts, in shape — one per reviewer:
 > present (what this team adopted, what they declined, their own `P-` rules), then the kit's
 > `PRACTICES.md` as the default. A repository that has adopted nothing is fine — findings then
 > carry `rule_id: null`. Never report non-adoption as a finding.
-> The manifest at `<D>/manifest.json` has two tiers: read the review tier in full; the
+> The manifest at `<D>/manifest.json` has three tiers: read the review tier in full; the
 > reference tier is described there and is to be queried with a script, never read — list those
 > in `scope.files_queried`. `<D>/probes.json` holds the mechanical checks, already run: treat
 > each hit as a place to look, never as a finding, and read the code before filing anything.
@@ -156,7 +167,7 @@ The prompts, in shape — one per reviewer:
 > heavier than that: classify a command before issuing it, never run a heavy one to check
 > something, and never substitute a sample for the real run. Record what you deferred and what
 > it would need.
-> Write your findings JSON to `.review/runs/<RUN>/findings-code.json`. Print one line only.
+> Write your findings JSON to `$STORE/runs/<RUN>/findings-code.json`. Print one line only.
 > Do not edit any file. Do not print your findings.
 > `<file list>`
 
@@ -179,6 +190,18 @@ in the same direction, and nothing else in this design would notice. (`R-2`)
 Give it the review-tier file list **minus the documents**, and tell it plainly that
 documentation has been withheld on purpose so it does not go looking for it.
 
+### What this audit does not cover
+
+There is no dedicated test-suite reviewer in the four. `review-code` reads test files as code
+and may call `review-tests` on one specific question, but nothing in a full audit asks *"does
+this suite defend what actually breaks?"* — and a suite can be green, well-formed and still
+guard none of the paths where a wrong number gets produced.
+
+Say so in the handover rather than letting a clean audit imply otherwise, and offer
+`/review-tests` as a separate run when the repository has a suite worth judging. Adding it as a
+fifth reviewer would change what a review costs, which is the user's decision, not this
+skill's.
+
 ### While they run
 
 Wait. Do not start reading the repository yourself — you would form the opinion the reconciler
@@ -192,13 +215,19 @@ another silently read 57% of its declared scope, and neither was caught until re
 ```bash
 for f in $D/findings-*.json; do
   python3 <review-kit>/bin/review.py validate --findings $f --manifest $D/manifest.json
-  python3 <review-kit>/bin/review.py audit --findings $f --repo . \
-      --access-log .review/access.jsonl        # only if the hook is wired up
   python3 <review-kit>/bin/review.py fingerprint --findings $f --manifest $D/manifest.json
 done
+
+# Scope honesty, only if the hook is wired up. Four reviewers write into one log, so each
+# findings file is audited against ITS OWN agent id — without that, every reviewer's reads
+# vouch for every other's claims, and `audit` refuses to run rather than pretend otherwise.
+python3 <review-kit>/bin/review.py audit --repo . --access-log $STORE/access.jsonl --list-agents
+# Match each id to a reviewer by the paths it touched, then, per file:
+python3 <review-kit>/bin/review.py audit --findings $D/findings-code.json --repo . \
+    --access-log $STORE/access.jsonl --agent <that reviewer's id>
 python3 <review-kit>/bin/review.py cluster --run-dir $D
 python3 <review-kit>/bin/review.py match --run-dir $D --prev-run <previous run dir>   # skip on a first review
-python3 <review-kit>/bin/review.py coverage --run-dir $D --out .review/coverage.json --run-id $RUN
+python3 <review-kit>/bin/review.py coverage --run-dir $D --out $STORE/coverage.json --run-id $RUN
 ```
 
 `coverage` records, per **(file, reviewer)** pair, who has read what and at which sha256. The
@@ -210,8 +239,16 @@ something has gone several runs without a look.
 
 `validate` fails on missing fields, an unread scope not declared in `not_reviewed`, a heavy
 command that was run anyway, and a `certain` confidence resting on reasoning or on a command
-that was never executed. `audit` compares `files_read` against the harness-written access log,
-which is the one check a reviewer cannot defeat from inside its own context.
+that was never executed. `audit` compares `files_read` against the harness-written access log, which is the one check a
+reviewer cannot defeat from inside its own context. **Pass `--agent`**: all four reviewers write
+into one log concurrently, so without it every reviewer's reads vouch for every other's claims.
+`audit` refuses to run on a multi-agent log when it is omitted.
+
+The ids are the harness's, not names you choose, so `audit --list-agents` prints the ones in
+the log together with what each touched; match them to reviewers by those paths. **If the
+mapping cannot be established, do not guess it.** Skip `audit` and say in the handover that
+scope honesty went unchecked this run — an unchecked claim that is labelled unchecked is a
+manageable state, and a reviewer credited with another's reads is not.
 
 A reviewer whose file fails gets **re-run once**, with the validator's output quoted to it. Do
 not paper over a failure — a reviewer that quietly skipped its scope produces the most dangerous
@@ -230,11 +267,11 @@ Spawn **one** agent, not in parallel with anything:
 
 > Read `<review-kit>/skills/reconcile-reviews/SKILL.md` and follow it exactly. Also read
 > `<review-kit>/FINDINGS.md` and `<review-kit>/PRACTICES.md`.
-> The findings files are `.review/runs/<RUN>/findings-*.json`, already validated and
+> The findings files are `$STORE/runs/<RUN>/findings-*.json`, already validated and
 > fingerprinted. In the same directory: `clusters.json` (corroborated groups, plus proximity
 > candidates you must judge by hand), `recurrence.json` (defects also reported last run),
-> `manifest.json` (the two-tier scope), `machine.json`, `probes.json` and `repo_profile.json`.
-> `.review/open_defects.json` carries defects earlier runs confirmed — run `carryover` against
+> `manifest.json` (the three-tier scope), `machine.json`, `probes.json` and `repo_profile.json`.
+> `$STORE/open_defects.json` carries defects earlier runs confirmed — run `carryover` against
 > it before `summarize`, as your skill's Stage 6 sets out.
 > Base commit for this review: `<base>`. Run id: `<RUN>`. Suite at `<review-kit>`.
 > This repository has `<a test suite / no test suite and no linter config>`; your post-fix
@@ -257,7 +294,6 @@ Relay the reconciler's report to the user. Add nothing of your own except:
 - Any reviewer that failed validation and was re-run, and whether it passed the second time.
 - Anything the scope audit flagged as an unsupported `files_read` claim.
 - Anything `coverage` reports as never reviewed or badly stale.
-- Whether the store is `--in-repo`, and so whether reviewer independence was structurally
   protected or merely requested.
 - **Every defect the reconciler classified as `missed`** — confirmed in an earlier run, its file
   reviewed again this run, its source unchanged, and not re-reported. That is a reviewer false
@@ -284,8 +320,8 @@ Then stop. The fixes are in the working tree, uncommitted; committing is the use
 
 ## Cost
 
-Four agents on a routine window, five with fresh-eyes, plus the reconciler's verification —
-which re-runs commands and may re-run an analysis script. This is not a pre-commit hook and not
+Four reviewers plus the reconciler — five agents — and the reconciler's verification
+re-runs commands and may re-run an analysis script. This is not a pre-commit hook and not
 a background job. The user decides when it is worth spending; your part is to make the offer
 cheap to accept and to report honestly afterwards.
 

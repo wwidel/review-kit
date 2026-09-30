@@ -66,7 +66,7 @@ most audit tooling works — means the later ones anchor on the first one's conc
 disagreements that carry the signal never appear.
 
 This is fragile in practice and has to be defended by construction. Twice a reviewer swept the
-repository with `grep -r` and picked up a previous run's `SUMMARY.md`. Both disclosed it; that
+repository with `grep -r` and picked up a previous run's `REVIEW-SUMMARY.md`. Both disclosed it; that
 is lucky, not a control. So the review store lives outside the repository behind a symlink, and
 the summary is shielded for the duration of the reviewer stage.
 
@@ -151,7 +151,7 @@ fixes.
 
 ### The ledger
 
-Each run appends to `.review/ledger.jsonl`: per reviewer, how many findings were reported,
+Each run appends to `$STORE/ledger.jsonl` — `.review/ledger.jsonl` on an install that symlinks the store into the repo, and a path under `~/.review-kit/` on a `--minimal` one. Per reviewer: how many findings were reported,
 confirmed, refuted and unverifiable, over what denominator.
 
 This is the only feedback signal that improves the reviewers over time. A confirmation rate
@@ -160,7 +160,7 @@ reviewer that is never refuted is probably reporting only the obvious. Findings 
 *rate* over a denominator — three findings in 140 functions versus three in twelve — are
 comparable across runs in a way raw counts never are.
 
-`.review/last_review.json` records where the last run got to, so the next one can be scoped
+`$STORE/last_review.json` records where the last run got to, so the next one can be scoped
 against it. It is a bookmark, not a timer: nothing reads its age and decides to run.
 
 ### Cost
@@ -172,16 +172,38 @@ audit per usage window.
 
 ---
 
+## Where the numbers on this page came from
+
+Every figure above was measured once, by hand, from the transcripts of the development runs on
+three Kaggle repositories — token totals read off the runs, the miss rate counted from two
+consecutive reviews of one repository, the refutation rate from a controlled injection of ten
+fabricated findings. **None of them has a script in this repository that reproduces it**, and
+the runs themselves were not kept. They are recorded here because a rough, honestly-labelled
+figure is more useful than silence about cost, and they should be read as one-off observations
+rather than as measurements you can check.
+
+That is a deliberate exception to this kit's own `N-1`, and the only one in it. Treat any of
+these numbers as stale the moment the protocol changes: the ledger (`$STORE/ledger.jsonl`) is
+what gives you figures for *your* repository, and those do have a source.
+
 ## Known limits
 
 - **`grep -R` and direct paths still reach the review store.** The symlink defeats `grep -r`,
   `rg` and `find`; it is a large reduction, not a guarantee.
-- **`audit` has never run end to end.** The access-log hook must be in the settings file of the
-  directory the session started in, and must be there before the session starts. Until it runs,
-  every reviewer's claim about what it read is taken on trust.
+- **`audit` has never run inside a live review.** Both halves are tested on fixtures — the hook
+  writes the log, and `audit` fails a claimed read that the log does not support — but the two
+  have never been joined by a real reviewer session. The hook must be in the settings file of
+  the directory the session started in, and must be there before the session starts; until that
+  holds, every reviewer's claim about what it read is taken on trust. `audit` refuses to run
+  without a log rather than reporting a pass it cannot support, so the failure mode is a missing
+  check, not a false one.
 - **Fingerprints under-cluster.** Two reviewers citing the same defect at adjacent lines get
   different fingerprints, which is why every run produces ~100 proximity candidates for the
   reconciler to judge by hand, and why the miss rate above is an upper bound.
 - **The reconciler is a single point of judgement.** It is the one stage with no independent
   check on it. The injection test is the only instrument pointed at it so far.
+- **Scope is an extension allowlist.** A file whose suffix is unknown and whose name is not one
+  of a handful of recognised build files (`Makefile`, `Dockerfile`, …) enters no tier. It is
+  recorded under `unclassified` in the manifest rather than dropped silently, but nothing
+  reviews it.
 - **Nothing measures whether a *confirmation* was earned** — only whether a refutation was.

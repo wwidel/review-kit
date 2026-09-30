@@ -70,5 +70,5 @@ is the workflow running, not a new one starting.
 - Bookkeeping goes through `bin/review.py`: scoping, contract validation, scope auditing,
   fingerprints, clustering, the summary and the ledger. Do not compute any of it by hand.
 - If the review window is empty, say so. Never review nothing.
-- `.review/last_review.json` is a bookmark for scoping the next run, not a timer. Its age is
+- `last_review.json` in the review store is a bookmark for scoping the next run, not a timer. Its age is
   never a reason to start one.

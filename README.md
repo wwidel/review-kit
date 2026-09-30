@@ -15,11 +15,11 @@ The least invasive option. Clone the kit somewhere, then point it at a repositor
 
 ```bash
 git clone <review-kit> ~/tools/review-kit
-python3 ~/tools/<review-kit>/bin/install.py --repo ~/code/some-project --minimal
+python3 ~/tools/review-kit/bin/install.py --repo ~/code/some-project --minimal
 ```
 
 **It writes nothing inside the repository.** The skills go to `~/.claude/skills/`, the review
-store to `~/.review-kit/<repo>/review/`. Open the project and type `/repo-audit`.
+store to `~/.review-kit/<repo>-<hash>/review/`. Open the project and type `/repo-audit`.
 
 **What you get**
 
@@ -98,11 +98,12 @@ when the session began: the settings watcher only watches directories that alrea
 session. Everything else in the kit works without the hook — only `audit` needs it, and it
 refuses to run rather than report a pass it cannot support.
 
-**Where the state lives.** `.review/` is a symlink to `~/.review-kit/<repo>/review/`, unless you
+**Where the state lives.** `.review/` is a symlink to `~/.review-kit/<repo>-<hash>/review/`, unless you
 installed with `--minimal`, which writes no symlink and leaves the store reachable only by its
-path under `~/.review-kit/`. The indirection is deliberate: `grep -r` and `rg` skip symlinked directories, so a reviewer sweeping the repository
+path under `~/.review-kit/`. The directory name carries a hash of the repository's absolute
+path, not just its basename, so two checkouts both called `analysis` do not share one coverage
+record and one defect history. The indirection is deliberate: `grep -r` and `rg` skip symlinked directories, so a reviewer sweeping the repository
 cannot pick up an earlier run's conclusions, while a person opening a file under `.review/` by
-path reads it normally. `install.py --in-repo` keeps a real directory instead, for teams who want the
 store committed and accept that a grep can then reach it.
 
 `REVIEW-SUMMARY.md` stays a real, committed file at the repo root — it is the deliverable. A
@@ -121,9 +122,11 @@ REVIEW-SUMMARY.md     the deliverable — confirmed defects, fixed vs for you. A
   open_defects.json   every confirmed defect across runs, and what became of it
   ledger.jsonl        per-reviewer confirmed/refuted/deferred, one row per run
   last_review.json    where the last run got to — a bookmark, not a timer
+  ledger.jsonl        one row per reviewer per run: reported, confirmed, refuted, deferred
   access.jsonl        every file a tool touched, written by the hook, not by any agent
-  runs/<run-id>/      manifest, machine, probes, per-reviewer findings, clusters,
-                      reconciliation.json, and pre/ snapshots of any file that was fixed
+  runs/<run-id>/      manifest, machine, repo_profile, probes, per-reviewer findings,
+                      clusters, recurrence, reconciliation.json, and pre/ snapshots of
+                      any file that was fixed
 ```
 
 ## Run
@@ -147,6 +150,7 @@ Individually, when a full audit is more than you need:
 /review-docs docs/RESULTS.md     # one file
 /review-code --full              # correctness only
 /review-tests                    # does the test suite defend what actually breaks
+                                 # (not part of /repo-audit — run it separately)
 ```
 
 `review-fresh-eyes` and `reconcile-reviews` are not run alone: the first is only meaningful
@@ -259,10 +263,11 @@ review-kit/
 
 Every command that needs to know which repository it is working on reads that from the
 manifest or run directory it was given, so none of them depends on the shell's current
-directory. Only `scope` and `characterize` require `--repo`, because at that point nothing
-has recorded it yet. This matters when the kit and the repository under review are different
-checkouts: you can drive a review of any repo from anywhere, and pointing a command at the
-wrong tree takes a deliberate `--repo` override.
+directory. `scope` and `characterize` require `--repo` because at that point nothing has
+recorded it yet, and `shield`, `unshield` and `audit` require it because no manifest is
+in play for them to read it from. This matters when the kit and the repository under review
+are different checkouts: you can drive a review of any repo from anywhere, and pointing a
+command at the wrong tree takes a deliberate `--repo` override.
 
 `bin/review.py` does every part of a review that does not require judgement. Agents find
 defects, verify defects and decide fixes; the script does the rest. This split is not
@@ -271,15 +276,16 @@ half, not the judgement half.
 
 | command | does |
 |---|---|
-| `scope` | the review window + a three-way manifest: a *review* tier read in full; a *tabular* reference tier (data files, anything over ~500 lines) described by size, sha256, columns and first row, queried by script and never read; and *opaque* files (decks, PDFs, spreadsheets, images, archives, model artefacts) listed so a reviewer knows they exist but can neither read nor query them. Exits non-zero on an empty scope |
+| `scope` | the review window + a three-way manifest: a *review* tier read in full (source, Markdown, and every other file under the threshold); a *tabular* reference tier — data files at any size, plus any other file over ~500 lines that is neither source nor Markdown — described by size, sha256, columns and first row, queried by script and never read; and *opaque* files (decks, PDFs, spreadsheets, images, archives, model artefacts) listed so a reviewer knows they exist but can neither read nor query them. Source and Markdown are never demoted, however long: a long script or README is where a defect hides, so `scope` names the oversized ones instead. Files it cannot place go under `unclassified`, and paths it cannot open — a dangling data symlink, most often — under `unreadable`; both are listed rather than dropped, so the manifest never claims a scope it did not achieve. Exits non-zero on an empty scope |
 | `probe` | runs ~23 mechanical checks once for every reviewer — seeds, unsafe deserialisation, broad excepts, dynamic dispatch, non-atomic writes, path literals, magic numbers, plus AST checks for unparseable files, names redefined in one scope, and functions with identical bodies |
 | `machine` | cores, usable memory, disk, GPU, and which frameworks are importable |
 | `characterize` | signals about the repo's posture — tests, linter, CI, commit recency. A hint for calibrating severity, never a finding |
 | `validate` | enforces the findings contract: missing fields, a heavy command that was run, `certain` resting on reasoning, an unread scope not declared |
-| `audit` | compares `files_read` against the harness-written access log — the one check an agent cannot defeat from inside its own context |
+| `audit` | compares `files_read` against the harness-written access log — the one check an agent cannot defeat from inside its own context. `--agent` scopes it to one reviewer's reads; `--list-agents` prints the ids in the log so each can be matched to a reviewer |
 | `fingerprint` | stamps a stable id from the file path and a normalised source anchor, so a defect keeps its identity across runs even when lines move |
 | `cluster` | groups findings that share a fingerprint (corroboration) and lists near-misses as candidates for the reconciler to judge |
 | `match` | which defects also appeared in the previous run and are still open |
+| `store` | prints this repo's review store, and with `--summary` where `REVIEW-SUMMARY.md` belongs — the repo root normally, the store under `--minimal`. Derive it; never hard-code either |
 | `shield` / `unshield` | move `REVIEW-SUMMARY.md` outside the repo for the reviewer stage and back afterwards; refuses a hold inside the repo, and recovers an interrupted shield |
 | `coverage` | per-(file, reviewer) record of what has been reviewed, at which sha256, and how stale each file is; names files never reviewed |
 | `carryover` | tracks confirmed defects across runs and classifies each as re-reported, not-re-checked, plausibly-fixed, or **missed** |

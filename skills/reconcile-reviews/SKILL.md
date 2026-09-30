@@ -32,7 +32,22 @@ particular, **every number a reviewer quotes is unverified until you read it fro
 Reviewers are subject to the same recall failure they are hunting (`N-13`); a plausible figure
 in a finding is a hypothesis about a figure.
 
-## Stage 0 — Know the budget before the first verdict
+## Stage 0 — Resolve the store, then the budget
+
+`$STORE` below is this repository's review store. Resolve it first; it is not always `.review/`,
+because a `--minimal` install puts it under `~/.review-kit/<repo>-<hash>/review/` and writes nothing
+into the repo at all:
+
+```bash
+STORE=$(python3 <review-kit>/bin/review.py store --repo .)
+SUMMARY=$(python3 <review-kit>/bin/review.py store --repo . --summary)
+```
+
+`$SUMMARY` is where the deliverable belongs **for this install**, and it is not always the repo
+root. A `--minimal` install promises to write nothing into the repository; writing the summary
+there anyway would break the only guarantee that mode makes. Never hard-code the filename.
+
+### Know the budget before the first verdict
 
 You are about to run other people's commands. The budget was measured for you into
 `$D/machine.json`; read it, and cross-check it against the `machine` block each reviewer
@@ -148,7 +163,7 @@ defect, it is a difference of standard, and the team already answered it.
 Fixes land **in the working tree only**. Never commit, never push, never amend. (`G-1`)
 
 - **Snapshot before you edit.** Copy every file you are about to modify to
-  `.review/runs/<RUN>/pre/<path>` first. Revert is then copying them back, which is exact and
+  `$STORE/runs/<RUN>/pre/<path>` first. Revert is then copying them back, which is exact and
   safe. Do not reach for `git checkout -- <file>` as the undo: the working tree may hold the
   user's own uncommitted work, and that command would destroy it alongside yours. (`G-4`)
   Put the restore command in the report.
@@ -176,7 +191,7 @@ APPLIED (4)
   src/pkg/io.py:41        unclosed file handle on the error path        [C-7]
   docs/RESULTS.md:88      broken link to a renamed script               [—]
   ...
-  Revert all: cp -r .review/runs/<RUN>/pre/. .
+  Revert all: cp -r $STORE/runs/<RUN>/pre/. .
 
 NEEDS YOU (14, most consequential first)
   ● CRITICAL  src/pkg/refit.py:88                                       [C-4]
@@ -192,7 +207,7 @@ NEEDS YOU (14, most consequential first)
   ● MAJOR     docs/RESULTS.md:112                                       [N-13]
     Quoted CV of 785.7 does not match the current output of the cited script
     a069.py, which gives 791.2. One of the two is stale.
-    Verified: re-ran the script; output in .review/runs/<id>/a069.out.
+    Verified: re-ran the script; output in $STORE/runs/<id>/a069.out.
 
 NEEDS A BIGGER MACHINE (3)  — verified nothing; these are the commands to run
   ● MAJOR     docs/RESULTS.md:140  CV figure cited to a069.py, not re-run       [M-4, N-13]
@@ -255,12 +270,12 @@ distinct defect with its disposition — and the renderer produces the document:
 
 ```bash
 python3 <review-kit>/bin/review.py carryover --run-dir $D \
-    --reconciliation $D/reconciliation.json --out .review/open_defects.json --run-id <RUN>
+    --reconciliation $D/reconciliation.json --out $STORE/open_defects.json --run-id <RUN>
 python3 <review-kit>/bin/review.py summarize --reconciliation $D/reconciliation.json \
-    --out REVIEW-SUMMARY.md --open-defects .review/open_defects.json \
+    --out $SUMMARY --open-defects $STORE/open_defects.json \
     --run-dir $D
 python3 <review-kit>/bin/review.py ledger --reconciliation $D/reconciliation.json \
-    --out .review/ledger.jsonl
+    --out $STORE/ledger.jsonl
 ```
 
 Run `carryover` **before** `summarize`, because the summary renders what it computes.
@@ -275,7 +290,18 @@ source anchor rather than the reviewers' word:
 | `re-reported` | found again this run — still open |
 | `not-re-checked` | its file was outside this run's review tier — carried forward, unverified |
 | `plausibly-fixed` | its file was reviewed and the offending source is gone |
+| `file-deleted` | its file no longer exists and this run scoped the whole repository, so it was deleted rather than left out of a window — deletion removes the defect. Never concluded on a `--since` run, where absence means out-of-window |
+| `fixed-this-run` / `refuted-this-run` | the reconciliation applied a fix for it, or refuted it, in this run |
+| `regressed` | it had been `plausibly-fixed`, its file was reviewed again, and the offending source is back |
+| `reported-not-carried` | a reviewer filed it again this run, but reconciliation did not carry it through — a downstream drop or a cluster that swallowed it, not a reviewer false negative |
+| `unanchored-not-checkable` | it has no source anchor (a repo-wide or prose-level defect), so presence cannot be tested; never auto-closed, because silence is not evidence of a fix |
+| `anchor-ambiguous` | its anchor text occurs more than once in the file, so it locates nothing and no conclusion is drawn |
 | **`missed`** | **its file was reviewed, the anchored source is byte-identical, and nobody raised it** |
+
+The last four are the ones that need a human. `regressed` means a fix came undone.
+`reported-not-carried` points at this pipeline rather than at the reviewers — read the run's
+findings files, not the code. `unanchored-not-checkable` and `anchor-ambiguous` are both
+"cannot tell": they stay open by construction, and the only way to close one is to look.
 
 `missed` is the line to read first, and **it is a candidate, not a verdict.** Go and look at
 each one before you report it, because two different things land here:
@@ -304,7 +330,25 @@ report had a section labelled "17 defects" over 16 distinct ones, and its worked
 confirmation rates did not match its own stated formula. A document full of numbers written by
 hand will drift, and this one is read as authoritative.
 
-Each item in `reconciliation.json`:
+`reconciliation.json` has this top level. `run_id`, `date`, `run_dir` and `items` are
+required — `summarize` refuses the file without them rather than dying on a missing key:
+
+```json
+{
+  "run_id": "2026-09-30T09-41-05Z",
+  "date": "2026-09-30",
+  "run_dir": "$STORE/runs/2026-09-30T09-41-05Z",
+  "head": "ae83f24",
+  "machine": { "cores": 14, "usable_gb": 6.5, "gpu": null },
+  "revert_cmd": "cp -a $STORE/runs/<RUN>/pre/. .",
+  "line_shift_note": "optional: say so if an applied fix moved line numbers",
+  "not_reviewed": ["what nobody looked at, and why"],
+  "confidence_note": "what depth of verification you actually reached",
+  "items": []
+}
+```
+
+Each item in `items`:
 
 ```json
 {"fingerprint": "…", "disposition": "applied|open|deferred|unverifiable|dropped",
@@ -322,7 +366,7 @@ Each item in `reconciliation.json`:
 reaches the summary.
 
 The terminal report is what the human reads now; `REVIEW-SUMMARY.md` is what they open next
-week. Overwrite it each run; per-run detail lives under `.review/runs/<RUN>/`.
+week. Overwrite it each run; per-run detail lives under `$STORE/runs/<RUN>/`.
 
 It answers exactly three questions, in this order, and nothing else:
 
@@ -349,7 +393,7 @@ Rules for what you put in `reconciliation.json`:
 - **A `defect` is never dropped for being small.** `trivial` severity changes how it is
   presented, never whether it appears. Only `dropped` — meaning refuted — removes a finding
   from the summary, and only after you checked and it was not so.
-- Keep it short enough to read in one sitting. Detail belongs in `.review/runs/<RUN>/`.
+- Keep it short enough to read in one sitting. Detail belongs in `$STORE/runs/<RUN>/`.
 
 ## Stage 7 — Read the ledger back
 
@@ -358,14 +402,24 @@ The `ledger` command in Stage 6 has already appended this run's rows. Your job h
 shaped like:
 
 ```json
-{"run_id": "...", "date": "...", "reviewer": "review-code", "scope_files": 23,
- "reported": 12, "confirmed": 9, "refuted": 2, "unverifiable": 1, "deferred": 0,
- "applied": 3, "corroborated": 2,
- "machine": {"cores": 4, "usable_gb": 3, "gpu": null},
- "denominators": {"functions_scanned": 140}}
+{"run_id": "...", "date": "...", "reviewer": "review-code",
+ "reported": 12, "confirmed": 9, "refuted": 2, "deferred": 0, "unverifiable": 1,
+ "rate_verifiable": 0.818,
+ "machine": {"cores": 4, "usable_gb": 3, "gpu": null}}
 ```
 
-Then update `.review/last_review.json` with the current commit and date, so the next run knows
+One row per reviewer named in a finding's `corroborated_by`, so a finding two reviewers raised
+counts once for each — the rows are per-reviewer tallies and do not sum to the run's finding
+count. `confirmed` counts both `open` and `applied` dispositions, since a fix that was applied
+was first confirmed; the ledger does not record separately how many were applied. A finding
+carrying no `corroborated_by` at all is tallied under the reviewer name `(unattributed)`,
+which is itself worth reading: it means the reconciliation lost track of who filed what.
+
+`rate_verifiable` is confirmed / (confirmed + refuted), or `null` when that denominator is
+zero. Re-running `ledger` on a run already in the file appends nothing and says so, so the
+denominators cannot be doubled by replaying Stage 6.
+
+Then update `$STORE/last_review.json` with the current commit and date, so the next run knows
 where to start.
 
 Two rates matter and they measure opposite failures. The **confirmation rate** —

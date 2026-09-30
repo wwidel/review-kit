@@ -30,6 +30,13 @@ SOURCE_EXT = {".py", ".pyx", ".sh", ".R", ".r", ".Rmd", ".jl", ".sql",
 # to "describe, do not read" hides exactly the file most worth reading.
 CODE_EXT = {".py", ".pyx", ".sh", ".R", ".r", ".Rmd", ".jl", ".sql"}
 
+# Markdown is exempt from the length threshold: review-docs is the document-integrity leg and
+# demoting a long README to "query with a script" blinds it to the longest document in the
+# repo, which is where an uncited number hides. Deliberately .md alone — .txt is a grab-bag
+# that has already included a 128,451-line word list, and .ipynb carries embedded output.
+# Both stay subject to the threshold.
+PROSE_EXT = {".md"}
+
 # Tabular data: described, and interrogated with a script rather than read.
 TABULAR_EXT = {".csv", ".tsv", ".parquet", ".jsonl"}
 
@@ -46,6 +53,19 @@ OPAQUE_EXT = {
     ".mp4", ".mov", ".wav", ".mp3", ".ttf", ".woff", ".woff2",
 }
 SOURCE_EXT = SOURCE_EXT | OPAQUE_EXT
+
+
+def write_atomic(path, text):
+    """Write via a sibling temp file and rename. `C-7`, which this kit asks of others.
+
+    It matters most where the target is somebody else's work: `fingerprint` rewrites a
+    reviewer's findings in place, and a crash between truncate and write loses a file no
+    stage can regenerate.
+    """
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
 
 
 def read_json(path, what):
@@ -89,15 +109,93 @@ def count_lines(p: Path) -> int:
         return 0
 
 
+def repo_slug(repo: Path) -> str:
+    """A per-repository directory name that two repositories cannot share.
+
+    The name alone is not enough: `~/work/analysis` and `~/client/analysis` both reduce to
+    "analysis", and they would then share one coverage record, one open-defect ledger and one
+    carryover history — so a defect confirmed in the first reads as "missed" in the second.
+    The path hash is what makes the name unique; the readable part is kept so a person can
+    still tell the directories apart by eye.
+    """
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", repo.name) or "repo"
+    return f"{name}-{hashlib.sha1(str(repo.resolve()).encode()).hexdigest()[:8]}"
+
+
+def store_path(repo: Path) -> Path:
+    """The review store for a repo. Every caller in the kit uses this, install.py included."""
+    return (Path.home() / ".review-kit" / repo_slug(repo) / "review").resolve()
+
+
+def shield_path(repo: Path) -> Path:
+    return (Path.home() / ".review-kit" / repo_slug(repo) / "shield").resolve()
+
+
+def installed_in_repo(repo: Path) -> bool:
+    """Did an install put anything inside this repository?
+
+    One test, used by both `store` and `store --summary`, because they disagreed: `store`
+    accepted a real `.review/` directory while `--summary` looked only for a symlink, so a
+    repo with the former was told its store was in the repo and its summary was not.
+    """
+    link = repo / ".review"
+    return link.is_symlink() or link.exists()
+
+
+def summary_path(repo: Path) -> Path:
+    """Where REVIEW-SUMMARY.md belongs for this install.
+
+    A normal install puts it at the repo root, committable, and the orchestrator shields it
+    while reviewers run. A `--minimal` install promises to write nothing into the repository,
+    so it goes to the store instead — the skills used to hard-code the repo path and broke
+    that promise on every run.
+    """
+    return ((repo / "REVIEW-SUMMARY.md") if installed_in_repo(repo)
+            else store_path(repo) / "REVIEW-SUMMARY.md")
+
+
 # ---------------------------------------------------------------- scope
 
-def iter_source(repo: Path):
+# Extensionless files that are nonetheless code. Without these a Dockerfile or Makefile —
+# part of the pipeline in most repos — is in no tier at all.
+NAMED_CODE = {"Makefile", "makefile", "GNUmakefile", "Dockerfile", "Containerfile",
+              "Justfile", "justfile", "Rakefile", "Procfile", "Vagrantfile"}
+
+
+def classify(p: Path):
+    """'source' if the file belongs in a tier, else None — the caller records the rest."""
+    if p.name in NAMED_CODE or p.suffix.lower() in SOURCE_EXT:
+        return "source"
+    return None
+
+
+def is_readable(p: Path) -> bool:
+    """Can this path actually be opened? A dangling symlink cannot.
+
+    `data/train.csv -> /mnt/nfs/...` on an unmounted volume is the most ordinary thing in a
+    data repository, and `os.walk` lists it like any other file. Every later stat, hash and
+    read then raises FileNotFoundError, which ended the whole audit at stage 0 with a
+    traceback. Such a path is recorded, never silently dropped.
+    """
+    try:
+        return p.exists() and p.stat().st_size >= 0
+    except OSError:
+        return False
+
+
+def iter_source(repo: Path, rejected=None, unreadable=None):
     for root, dirs, files in os.walk(repo):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for fn in files:
             p = Path(root) / fn
-            if p.suffix.lower() in SOURCE_EXT:
+            if not is_readable(p):
+                if unreadable is not None:
+                    unreadable.append(p)
+                continue
+            if classify(p):
                 yield p
+            elif rejected is not None:
+                rejected.append(p)
 
 
 DATA_EXT = {".csv", ".tsv", ".json", ".jsonl", ".parquet"}
@@ -106,8 +204,17 @@ DATA_EXT = {".csv", ".tsv", ".json", ".jsonl", ".parquet"}
 def describe_reference(p: Path, rel: str):
     """Enough for a reviewer to know what is in a file without reading it."""
     opaque = p.suffix.lower() in OPAQUE_EXT
-    d = {"path": rel, "sha256": sha256_of(p), "bytes": p.stat().st_size,
+    # A file can become unreadable between the walk and here — a race, a revoked permission,
+    # a link whose target went away. Describing it as best we can beats ending the run.
+    try:
+        size, digest = p.stat().st_size, sha256_of(p)
+    except OSError as e:
+        size, digest = None, None
+    d = {"path": rel, "sha256": digest, "bytes": size,
          "kind": "opaque" if opaque else "tabular"}
+    if digest is None:
+        d["note"] = f"could not be read when the manifest was built ({p}); treat as unchecked"
+        return d
     if opaque:
         d["note"] = ("cannot be read as text or queried by a short script. Do NOT attempt to "
                      "read it. Note its existence, and say so in not_reviewed if its content "
@@ -137,6 +244,8 @@ def cmd_scope(a):
     out.mkdir(parents=True, exist_ok=True)
 
     mode, base, paths = "full", None, None
+    if a.since and a.full:
+        die("--since and --full ask for different windows; pass one.")
     if a.since:
         rc, o, e = sh(f"git rev-parse --verify {a.since}^{{commit}}", cwd=repo)
         if rc:
@@ -146,11 +255,32 @@ def cmd_scope(a):
         # the uncommitted change is usually the thing most worth reviewing, and excluding it
         # would silently review a state nobody is currently in.
         rc, o, _ = sh(f"git diff --name-only {base}", cwd=repo)
-        paths = [repo / x for x in o.splitlines() if x.strip()]
-        paths = [p for p in paths if p.exists() and p.suffix.lower() in SOURCE_EXT]
+        names = [x for x in o.splitlines() if x.strip()]
+        # `git diff` lists tracked modifications only. A file created and not yet added is
+        # both the most likely thing to be under review and the most likely to be missed.
+        rc2, untracked, _ = sh("git ls-files --others --exclude-standard", cwd=repo)
+        names += [x for x in untracked.splitlines() if x.strip()]
+        paths = [repo / x for x in dict.fromkeys(names)]
 
+    rejected, unreadable, deleted = [], [], []
     if paths is None:
-        paths = sorted(iter_source(repo))
+        paths = sorted(iter_source(repo, rejected, unreadable))
+    else:
+        # --since used to filter silently, so a new file with an unknown suffix — a .dvc
+        # stage, a .lock — vanished from the manifest with nothing recorded. Full mode
+        # records those under `unclassified`; the mode most runs actually use must too.
+        kept = []
+        for p in paths:
+            if not is_readable(p):
+                # A path in the diff that is simply gone was DELETED in this window — an
+                # ordinary event, and not the same thing as a file that exists and cannot be
+                # opened. Calling a deletion "unreadable" would put an unmounted-volume
+                # warning on most incremental runs. A dangling symlink still counts as
+                # unreadable: it is present, and its target is not.
+                (unreadable if p.is_symlink() else deleted).append(p)
+                continue
+            (kept if classify(p) else rejected).append(p)
+        paths = kept
 
     rc, head, _ = sh("git rev-parse --short HEAD", cwd=repo)
     review, reference, oversized = [], [], []
@@ -161,7 +291,8 @@ def cmd_scope(a):
         # at all; .json is neither, because a 20-line config is something a reviewer must
         # actually read. Length decides for everything else.
         ext = p.suffix.lower()
-        is_code = p.suffix in CODE_EXT or ext in {e.lower() for e in CODE_EXT}
+        is_code = (p.suffix in CODE_EXT or ext in {e.lower() for e in CODE_EXT}
+                   or ext in PROSE_EXT)
         if is_code and n > a.reference_threshold:
             oversized.append((rel, n))
         if ext in TABULAR_EXT or ext in OPAQUE_EXT or (n > a.reference_threshold
@@ -178,13 +309,44 @@ def cmd_scope(a):
         "reference": reference,
         "total_files": len(review),
         "total_lines": sum(f["lines"] for f in review),
+        # Recorded rather than silently dropped: a manifest that lists neither the file nor
+        # the fact that it was skipped reports a complete-looking scope it has not achieved.
+        "unclassified": [{"path": str(q.relative_to(repo)),
+                          "bytes": q.stat().st_size if is_readable(q) else None}
+                         for q in sorted(rejected)],
+        # Listed, not dropped: a reviewer told "these files exist and could not be opened"
+        # can say so, where a silent omission reports a complete scope it did not achieve.
+        "unreadable": [{"path": str(q.relative_to(repo)),
+                        "symlink_to": os.readlink(q) if q.is_symlink() else None}
+                       for q in sorted(unreadable)],
+        # Only ever populated by --since. A removal can itself be the defect — a script the
+        # docs still reference, a test that guarded the thing that just changed — so the
+        # window names what left it rather than showing a scope with a silent hole.
+        "deleted": [str(q.relative_to(repo)) for q in sorted(deleted)],
         "reference_files": len(reference),
         "reference_lines": sum(f.get("lines", 0) for f in reference),
         "opaque_files": sum(1 for f in reference if f.get("kind") == "opaque"),
     }
-    (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    write_atomic((out / "manifest.json"), json.dumps(manifest, indent=2))
     n_opaque = manifest["opaque_files"]
     n_tab = len(reference) - n_opaque
+    if deleted:
+        print(f"  note: {len(deleted)} file(s) were DELETED in this window and are listed "
+              "under `deleted` in the manifest — a removal can be the defect:", file=sys.stderr)
+        for q in sorted(deleted)[:8]:
+            print(f"    {q.relative_to(repo)}", file=sys.stderr)
+    if unreadable:
+        print(f"  note: {len(unreadable)} path(s) could not be opened and are in no tier — "
+              "recorded under `unreadable` in the manifest. A dangling symlink is the usual "
+              "cause; the target may simply not be mounted here:", file=sys.stderr)
+        for q in sorted(unreadable)[:8]:
+            tgt = f" -> {os.readlink(q)}" if q.is_symlink() else ""
+            print(f"    {q.relative_to(repo)}{tgt}", file=sys.stderr)
+    if rejected:
+        print(f"  note: {len(rejected)} file(s) match no known extension and are in no tier — "
+              "recorded under `unclassified` in the manifest, not reviewed:", file=sys.stderr)
+        for q in sorted(rejected)[:8]:
+            print(f"    {q.relative_to(repo)}", file=sys.stderr)
     print(f"scope: {len(review)} files to READ ({manifest['total_lines']} lines), "
           f"{n_tab} to QUERY ({manifest['reference_lines']} lines), "
           f"{n_opaque} opaque (listed, unreadable), "
@@ -242,7 +404,7 @@ def cmd_machine(a):
     m = {"cores": cores, "usable_gb": usable_gb, "total_gb": total_gb,
          "gpu": gpus or None, "free_disk_gb": free_disk_gb, "importable": frameworks}
     if a.out:
-        Path(a.out).write_text(json.dumps(m, indent=2))
+        write_atomic(Path(a.out), json.dumps(m, indent=2))
     print(json.dumps(m, indent=2))
 
 
@@ -283,7 +445,7 @@ def cmd_characterize(a):
                                 "finding — the human states the repo's posture, and a live "
                                 "repo is the default assumption for this kit")
     if a.out:
-        Path(a.out).write_text(json.dumps(signals, indent=2))
+        write_atomic(Path(a.out), json.dumps(signals, indent=2))
     print(json.dumps(signals, indent=2))
 
 
@@ -316,8 +478,11 @@ REGEX_PROBES = [
      r"\.(?:fit|fit_transform|partial_fit)\s*\("),
     ("eager-read", "D-2", "a full read where a scan or chunked read may be needed",
      r"\b(?:read_parquet|read_csv|read_json|readlines|\.read\(\))"),
-    ("nonatomic-write", "C-7", "a write straight to its final path — no write-then-rename",
-     r"\b(?:to_csv|to_parquet|torch\.save|np\.save|json\.dump|pickle\.dump)\s*\("),
+    ("nonatomic-write", "C-7", "a write straight to its final path — no write-then-rename. "
+     "Includes the stdlib idioms, without which a pure-stdlib project gets a clean report it "
+     "has not earned",
+     r"\b(?:to_csv|to_parquet|torch\.save|np\.save|json\.dump|pickle\.dump)\s*\(|"
+     r"\.write_text\s*\(|\.write_bytes\s*\(|\bopen\s*\([^)]*['\"][wa]"),
     ("naive-datetime", "D-6", "a datetime constructed without a timezone",
      r"datetime\.(?:now|utcnow|fromtimestamp)\s*\(\s*\)|datetime\.datetime\s*\([^)]*\)"),
     ("index-escape", None, "escaping index alignment — pairs rows positionally",
@@ -334,6 +499,12 @@ REGEX_PROBES = [
      r"[\'\"](?:\.{0,2}/)?(?:[\w.-]+/){1,}[\w.-]+[\'\"]"),
     ("open-no-with", None, "open() not in a with-statement", r"(?<!with\s)\bopen\s*\("),
 ]
+
+# Suffixes the regex probes actually sweep. Reported coverage must match this set: probe
+# once claimed 13 files probed when it had swept 3, which overstates the denominator every
+# other number is read against.
+PROBE_EXT = {".py", ".pyx", ".sh", ".yml", ".yaml", ".toml", ".cfg", ".ini", ".sql",
+             ".r", ".rmd", ".jl"}
 
 MAX_HITS = 25
 
@@ -357,7 +528,7 @@ def cmd_probe(a):
         rx = re.compile(pat)
         hits, matched = [], {}
         for p, lines in texts.items():
-            if p.suffix not in (".py", ".sh", ".yml", ".yaml"):
+            if p.suffix.lower() not in PROBE_EXT:
                 continue
             for i, line in enumerate(lines, 1):
                 m = rx.search(line)
@@ -442,15 +613,20 @@ def cmd_probe(a):
                        "truncated": len(hits) > MAX_HITS,
                        "distinct_matches": len(hits), "matches": {}})
 
-    out = {"repo": str(repo), "files_probed": len(texts),
+    swept = [q for q in texts if q.suffix.lower() in PROBE_EXT]
+    out = {"repo": str(repo), "files_probed": len(swept),
+           "files_in_review_tier": len(texts),
+           "files_not_swept_by_regex_probes": sorted(
+               str(q.relative_to(repo)) for q in texts if q.suffix.lower() not in PROBE_EXT),
            "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
            "note": "A probe hit is a place to LOOK, not a finding. These are deliberately "
                    "over-inclusive; most hits are fine. Never file a finding because a probe "
                    "matched — read the code and decide. Never file one WITHOUT reading it.",
            "max_hits_per_probe": MAX_HITS, "probes": probes}
-    Path(a.out).write_text(json.dumps(out, indent=2))
+    write_atomic(Path(a.out), json.dumps(out, indent=2))
     nz = [p for p in probes if p["total_hits"]]
-    print(f"probe: {len(texts)} files, {len(probes)} probes, {len(nz)} with hits "
+    print(f"probe: {len(swept)} of {len(texts)} review-tier files swept, "
+          f"{len(probes)} probes, {len(nz)} with hits "
           f"({sum(p['total_hits'] for p in probes)} total) → {a.out}")
     for pr in sorted(nz, key=lambda x: -x["total_hits"]):
         extra = (f"  ({pr['distinct_matches']} distinct)"
@@ -514,12 +690,27 @@ def validate_findings(doc, manifest=None, repo=None):
             v.append(f"{len(queried & opq)} opaque file(s) listed in files_queried: "
                      + ", ".join(sorted(queried & opq)[:4])
                      + ". An opaque file cannot be queried either; it goes in not_reviewed.")
-        nr = " ".join(str(x) for x in doc.get("not_reviewed", []))
-        undeclared = [p for p in sorted(unread) if p not in nr]
+        # A path must be DECLARED, not merely mentioned. The previous substring test let
+        # prose vouch for coverage: a reviewer filing `files_read: []` with the note
+        # "I looked at a.py and b.py, honest" passed, because the names appeared somewhere
+        # in the string. An entry now declares a path only by leading with it.
+        declared = set()
+        for entry in doc.get("not_reviewed", []):
+            if isinstance(entry, dict) and entry.get("path"):
+                declared.add(str(entry["path"]).strip())
+                continue
+            head = re.split(r"[\s,;:]|—|--", str(entry).strip(), maxsplit=1)[0].strip().rstrip(",")
+            if head:
+                declared.add(head)
+        undeclared = [q for q in sorted(unread) if q not in declared]
         if undeclared:
             v.append(f"SCOPE GAP: {len(unread)} of {len(inscope)} in-scope files not read, "
-                     f"and {len(undeclared)} of those are absent from not_reviewed: "
-                     + ", ".join(undeclared[:6]) + ("…" if len(undeclared) > 6 else ""))
+                     f"and {len(undeclared)} of those are not declared in not_reviewed: "
+                     + ", ".join(undeclared[:6]) + ("…" if len(undeclared) > 6 else "")
+                     + ". Each unread file needs its own not_reviewed entry LEADING with the "
+                       "path — \"path/to/file.py — why it was not read\" — or an object "
+                       "{\"path\": ..., \"reason\": ...}. Prose that merely mentions a "
+                       "filename does not count as declaring it.")
 
     ids = set()
     for i, f in enumerate(doc.get("findings", [])):
@@ -606,7 +797,13 @@ def normalize_anchor(text: str, strip_comments: bool = True) -> str:
     return t
 
 
-CODE_SUFFIXES = {".py", ".sh", ".yml", ".yaml", ".toml", ".cfg", ".ini"}
+# Suffixes where `#` begins a comment, so an anchor should be compared without it. Kept
+# separate from CODE_EXT, which decides tiering, but derived from it rather than retyped:
+# .R and .jl were missing here while present there, so editing a comment in an R script moved
+# the fingerprint and the defect read as fixed. `.sql` comments with `--`, and `.Rmd` is
+# Markdown around its chunks, where `#` is a heading — stripping it there deletes the line.
+HASH_COMMENT_EXT = (CODE_EXT - {".sql", ".Rmd"}) | {".yml", ".yaml", ".toml", ".cfg", ".ini"}
+CODE_SUFFIXES = {e.lower() for e in HASH_COMMENT_EXT}
 
 
 def finding_fingerprint(f, repo: Path):
@@ -632,10 +829,14 @@ def finding_fingerprint(f, repo: Path):
                 basis = "source-anchor"
         except OSError:
             pass
-    if not anchor:
+    if anchor:
+        key = f"{path}|{anchor}"
+    else:
+        # No source anchor: still needs a stable id, so hash a slug of the claim — but the
+        # anchor itself stays empty. `anchor_present` can only answer honestly about text
+        # that is actually in the file, and a slug never is.
         words = re.findall(r"[a-zA-Z_][a-zA-Z0-9_]{2,}", f.get("claim", ""))
-        anchor = " ".join(words[:8]).lower()
-    key = f"{path}|{anchor}"
+        key = f"{path}|{' '.join(words[:8]).lower()}"
     return hashlib.sha1(key.encode()).hexdigest()[:12], basis, anchor
 
 
@@ -653,7 +854,7 @@ def cmd_fingerprint(a):
         f["fingerprint_anchor"] = anchor
         f["fingerprint_line"] = f.get("line")
         weak += basis != "source-anchor"
-    p.write_text(json.dumps(doc, indent=2))
+    write_atomic(p, json.dumps(doc, indent=2))
     print(f"fingerprint {doc.get('reviewer')}: {len(doc.get('findings', []))} stamped, "
           f"{weak} weak (claim-slug, no source anchor)  [repo: {repo}]")
 
@@ -668,6 +869,12 @@ def cmd_cluster(a):
     if not docs:
         die(f"no findings-*.json in {run}. Clustering nothing would write an empty file that "
             "later stages would read as 'no reviewer found anything'.")
+    unstamped = [(d.get("reviewer"), f.get("id")) for d in docs
+                 for f in d.get("findings", []) if not f.get("fingerprint")]
+    if unstamped:
+        die("these findings carry no fingerprint, so they would all group together and "
+            "invent corroboration between unrelated defects — run `fingerprint` first:\n"
+            + "\n".join(f"    {r}: {i}" for r, i in unstamped[:10]))
     by_fp, all_f = {}, []
     for d in docs:
         for f in d.get("findings", []):
@@ -717,7 +924,7 @@ def cmd_cluster(a):
         "total_findings": len(all_f),
         "distinct_fingerprints": len(by_fp),
     }
-    (run / "clusters.json").write_text(json.dumps(out, indent=2))
+    write_atomic((run / "clusters.json"), json.dumps(out, indent=2))
     print(f"cluster: {len(all_f)} findings → {len(by_fp)} distinct fingerprints; "
           f"{len(cross)} corroborated across reviewers; "
           f"{len(intra)} same-reviewer duplicates; "
@@ -732,8 +939,11 @@ def cmd_match(a):
     prev = Path(a.prev_run).resolve() if a.prev_run else None
     curfp = {}
     for p in sorted(cur.glob("findings-*.json")):
-        for f in json.loads(p.read_text()).get("findings", []):
-            curfp[f.get("fingerprint")] = f
+        for f in read_json(p, "findings file").get("findings", []):
+            if not f.get("fingerprint"):
+                die(f"{p.name} finding {f.get('id')!r} has no fingerprint; run `fingerprint` "
+                    "first or every unstamped finding matches every other.")
+            curfp[f["fingerprint"]] = f
     prevfp = {}
     if prev and prev.exists():
         for p in sorted(prev.glob("findings-*.json")):
@@ -746,7 +956,7 @@ def cmd_match(a):
                           "claim": curfp[k].get("claim")} for k in recurring],
            "new": len(new), "resolved_or_absent": len(gone),
            "prev_run": str(prev) if prev else None}
-    (cur / "recurrence.json").write_text(json.dumps(out, indent=2))
+    write_atomic((cur / "recurrence.json"), json.dumps(out, indent=2))
     print(f"match: {len(recurring)} recurring, {len(new)} new, {len(gone)} gone since "
           f"{prev.name if prev else 'no prior run'}")
     for k in recurring[:10]:
@@ -785,11 +995,15 @@ def _load_json(p, default=None):
         die(f"{p} is not valid JSON: {e}")
 
 
-def anchor_present(repo: Path, rel: str, anchor: str) -> bool:
-    """Is this normalised source anchor still somewhere in the file?
+def anchor_present(repo: Path, rel: str, anchor: str):
+    """Is this normalised source anchor still in the file? True, False, or None for "cannot tell".
 
     Position-independent on purpose: the defect has not been fixed merely because the lines
     around it moved. Only a change to the offending text itself counts.
+
+    None is returned when the anchor occurs more than once, because an anchor that matches in
+    several places locates nothing — and answering anyway would either bury a real defect or
+    accuse a reviewer of missing one it had no way to find.
     """
     if not anchor:
         return False
@@ -801,11 +1015,16 @@ def anchor_present(repo: Path, rel: str, anchor: str) -> bool:
     except OSError:
         return False
     strip = p.suffix.lower() in CODE_SUFFIXES
+    hits = 0
     for i in range(len(lines)):
         window = " ".join(normalize_anchor(x, strip) for x in lines[i:i + 2]).strip()
         if window and window == anchor:
-            return True
-    return False
+            hits += 1
+            if hits > 1:
+                # Occurs more than once, so it identifies nothing. Declining to answer is
+                # the safe side: the caller treats "not present" as evidence of a fix.
+                return None
+    return hits == 1
 
 
 def resolve_fingerprints(rec, run_dir: Path):
@@ -829,6 +1048,11 @@ def resolve_fingerprints(rec, run_dir: Path):
         except ValueError:
             pass
     if not known:
+        if rec.get("items"):
+            die(f"no findings-*.json in {run_dir}, so no reconciliation fingerprint can be "
+                "checked against anything. This validation exists because an agent once "
+                "abbreviated all 58 of them and nothing noticed; silently passing here would "
+                "reinstate that.")
         return [], []
     repaired, bad = [], []
     for item in rec.get("items", []):
@@ -869,7 +1093,6 @@ def report_fingerprints(rec, run_dir, strict=True):
 def cmd_coverage(a):
     """Merge one run into the persistent per-(file, reviewer) coverage record."""
     run = Path(a.run_dir).resolve()
-    repo = repo_from(run_dir=run, override=a.repo)
     man = _load_json(run / "manifest.json")
     if not man:
         die(f"no manifest.json in {run}")
@@ -932,10 +1155,21 @@ def cmd_coverage(a):
     idx = {r: i for i, r in enumerate(cov["runs"])}
     for path, e in cov["files"].items():
         last = e.get("last_reviewed_run")
-        e["runs_since_reviewed"] = (len(cov["runs"]) - 1 - idx[last]) if last in idx else None
+        if last in idx:
+            e["runs_since_reviewed"] = len(cov["runs"]) - 1 - idx[last]
+            e["runs_since_reviewed_exact"] = True
+        elif last:
+            # Reviewed once, longer ago than the retained run list. It used to get None here,
+            # which put it in neither the "never reviewed" list nor the stale one — the
+            # stalest files in the repository were the ones that disappeared from the report.
+            e["runs_since_reviewed"] = len(cov["runs"])
+            e["runs_since_reviewed_exact"] = False
+        else:
+            e["runs_since_reviewed"] = None
+            e["runs_since_reviewed_exact"] = True
     cov["protocol_version"] = a.protocol_version or cov.get("protocol_version")
     cov["updated"] = now
-    cov_path.write_text(json.dumps(cov, indent=2))
+    write_atomic(cov_path, json.dumps(cov, indent=2))
 
     files = cov["files"]
     never = [p for p, e in files.items() if not e.get("last_reviewed_run")]
@@ -949,7 +1183,8 @@ def cmd_coverage(a):
         for p_ in sorted(never)[:8]:
             print(f"    NEVER REVIEWED  {p_}")
     for n, p_ in sorted(stale, reverse=True)[:5]:
-        print(f"    stale ({n} run(s))  {p_}")
+        atleast = "" if files[p_].get("runs_since_reviewed_exact", True) else "at least "
+        print(f"    stale ({atleast}{n} run(s))  {p_}")
 
 
 def cmd_carryover(a):
@@ -964,6 +1199,7 @@ def cmd_carryover(a):
     report_fingerprints(rec, run)
     man = _load_json(run / "manifest.json")
     reviewed = {f["path"] for f in man.get("files", [])}
+    full_scope = man.get("mode") == "full"
 
     known = _load_json(a.out, {"defects": {}})
     known.setdefault("defects", {})
@@ -1010,7 +1246,7 @@ def cmd_carryover(a):
         if d.get("status") == "plausibly-fixed":
             # Already resolved once. Only the offending text COMING BACK reopens it — a file
             # dropping out of the review window must never resurrect a fixed defect.
-            if anchor and file_ in reviewed and anchor_present(repo, file_, anchor):
+            if anchor and file_ in reviewed and anchor_present(repo, file_, anchor) is True:
                 d["status"], d["last_outcome"] = "open", "regressed"
                 states.setdefault("regressed", []).append(fp_)
             continue
@@ -1019,7 +1255,16 @@ def cmd_carryover(a):
             # checked, so it is never auto-closed. Silence is not evidence of a fix.
             d["status"] = "open"
             d["last_outcome"] = "unanchored-not-checkable"
-            states.setdefault("unanchored", []).append(fp_)
+            states.setdefault("unanchored-not-checkable", []).append(fp_)
+        elif full_scope and file_ and not (repo / file_).exists():
+            # The file is gone and this run looked at the whole repository, so it was deleted
+            # rather than merely left out of a window. Deletion removes the defect; carrying
+            # it forever as "not re-checked" kept dead findings open indefinitely. Only ever
+            # concluded on a full scope — under --since, absence means out-of-window.
+            d["status"] = "plausibly-fixed"
+            d["last_outcome"] = "file-deleted"
+            d["resolved_run"] = run_id
+            states.setdefault("file-deleted", []).append(fp_)
         elif file_ not in reviewed:
             d["status"] = "open"
             d["last_outcome"] = "not-re-checked"
@@ -1032,6 +1277,10 @@ def cmd_carryover(a):
             d["reported_not_carried_in_runs"] = sorted(
                 set(d.get("reported_not_carried_in_runs", []) + [run_id]))
             states.setdefault("reported-not-carried", []).append(fp_)
+        elif anchor_present(repo, file_, anchor) is None:
+            d["status"] = "open"
+            d["last_outcome"] = "anchor-ambiguous"
+            states.setdefault("anchor-ambiguous", []).append(fp_)
         elif anchor_present(repo, file_, anchor):
             # The file was reviewed, the defect was not re-reported, and the anchored text is
             # byte-identical. That is a CANDIDATE reviewer false negative, not a proven one:
@@ -1062,17 +1311,23 @@ def cmd_carryover(a):
             d["anchor"] = anchors[fp_]["anchor"]
         d.update({"where": item.get("where"), "severity": item.get("severity"),
                   "class": item.get("class"), "title": item.get("title"),
-                  "last_seen_run": run_id, "last_outcome": "re-reported"})
+                  "last_seen_run": run_id})
+        # The outcome follows the disposition. It used to be stamped "re-reported" for every
+        # item including the fixed and the refuted ones, so the record said "found again,
+        # still open" about a defect it had just marked fixed.
         if disp == "applied":
             d["status"], d["resolved_run"] = "fixed", run_id
+            d["last_outcome"] = "fixed-this-run"
         elif disp == "dropped":
             d["status"] = "dropped"
+            d["last_outcome"] = "refuted-this-run"
         else:
             d["status"] = "open"
+            d["last_outcome"] = "re-reported"
             states["re-reported"].append(fp_)
 
     known["updated"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-    Path(a.out).write_text(json.dumps(known, indent=2))
+    write_atomic(Path(a.out), json.dumps(known, indent=2))
 
     still_open = {k: v for k, v in known["defects"].items() if v.get("status") == "open"}
     print(f"carryover: {len(known['defects'])} defect(s) tracked, {len(still_open)} open "
@@ -1083,8 +1338,9 @@ def cmd_carryover(a):
               "check they are genuinely the same defect:")
         for fp_, disps in list(collisions.items())[:6]:
             print(f"    {fp_}  {sorted(disps)}  {known['defects'][fp_].get('where')}")
-    for st in ("re-reported", "reported-not-carried", "missed", "regressed", "unanchored",
-               "not-re-checked", "plausibly-fixed"):
+    for st in ("re-reported", "reported-not-carried", "missed", "regressed",
+               "unanchored-not-checkable", "anchor-ambiguous", "not-re-checked",
+               "file-deleted", "plausibly-fixed"):
         if states.get(st):
             print(f"  {st:16} {len(states[st])}")
     if states.get("reported-not-carried"):
@@ -1118,17 +1374,27 @@ def _hold_dir(repo: Path, hold: str | None) -> Path:
     `grep -r` found them exactly as before and the shield did nothing. Somewhere outside the
     tree is the whole requirement, so it is checked rather than assumed.
     """
-    if hold:
-        h = Path(hold).expanduser().resolve()
-    else:
-        slug = re.sub(r"[^A-Za-z0-9_.-]", "_", repo.name)
-        h = (Path.home() / ".review-kit" / slug / "shield").resolve()
+    h = Path(hold).expanduser().resolve() if hold else shield_path(repo)
     try:
         h.relative_to(repo)
     except ValueError:
         return h  # outside the repo, which is what we need
     die(f"--hold {h} resolves inside {repo}. Shielded files must sit outside the repository "
         "or a reviewer's `grep -r` finds them exactly as before.")
+
+
+def cmd_store(a):
+    """Print the review store for a repo. One implementation, so a caller never re-derives it.
+
+    The orchestrator used to hard-code `.review/`, which the --minimal install deliberately
+    does not create — so a run following the Quick install wrote its findings inside the
+    repository it was auditing, where a reviewer's grep reaches them.
+    """
+    repo = Path(a.repo).resolve()
+    if a.summary:
+        print(summary_path(repo))
+        return
+    print((repo / ".review") if installed_in_repo(repo) else store_path(repo))
 
 
 def cmd_shield(a):
@@ -1146,9 +1412,12 @@ def cmd_shield(a):
     if marker.exists():
         # An interrupted run left files out of the repo. One marker per repository, so this is
         # always recoverable no matter which run dir was in play when it stopped.
-        back = _unshield(marker)
+        back, parked = _unshield(marker)
         print(f"  note: an unrestored shield was found and has been restored first "
               f"({len(back)} file(s))", file=sys.stderr)
+        for name, alt in parked:
+            print(f"  note: {name} had been rewritten since it was shielded, so the held copy "
+                  f"was NOT put back over it — it is at {alt}", file=sys.stderr)
     hold.mkdir(parents=True, exist_ok=True)
     moved = []
     for name in SHIELDABLE:
@@ -1180,17 +1449,31 @@ def cmd_shield(a):
 
 
 def _unshield(marker: Path):
+    """Put shielded files back. Never over a file that appeared while they were away.
+
+    `shutil.move` onto an existing path overwrites it silently. After an interrupted run the
+    person may well have written a new summary; restoring the held copy over it destroyed
+    their work and reported only that a shield "has been restored". A collision is now kept
+    beside the current file and named, so nothing is lost either way.
+    """
     spec = json.loads(marker.read_text())
     repo, hold = Path(spec["repo"]), marker.parent
-    back = []
+    back, parked = [], []
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     for name in spec.get("moved", []):
         src, dst = hold / name, repo / name
-        if src.exists():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(dst))
-            back.append(name)
+        if not src.exists():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if dst.exists():
+            alt = dst.with_name(f"{dst.name}.shielded-{stamp}")
+            shutil.move(str(src), str(alt))
+            parked.append((name, alt))
+            continue
+        shutil.move(str(src), str(dst))
+        back.append(name)
     marker.unlink()
-    return back
+    return back, parked
 
 
 def cmd_unshield(a):
@@ -1199,8 +1482,11 @@ def cmd_unshield(a):
     if not marker.exists():
         print("unshield: nothing is shielded for this repository")
         return
-    back = _unshield(marker)
+    back, parked = _unshield(marker)
     print(f"unshield: restored {len(back)} file(s)" + (f" — {', '.join(back)}" if back else ""))
+    for name, alt in parked:
+        print(f"  {name} was rewritten while shielded; the held copy was kept separately at "
+              f"{alt} rather than overwriting it", file=sys.stderr)
 
 
 # ---------------------------------------------------------------- audit (scope honesty)
@@ -1212,19 +1498,53 @@ def cmd_audit(a):
     reviewer can overstate files_read in its own JSON; it cannot manufacture entries
     here without actually issuing the tool calls.
     """
-    doc = read_json(a.findings, "findings file")
-    declared = set(doc.get("scope", {}).get("files_read") or [])
     repo = Path(a.repo).resolve()
-    touched = set()
     logp = Path(a.access_log)
     if not logp.exists():
         die(f"no access log at {logp} — the hook is not wired up; see review-kit/README.md")
+
+    if not a.list_agents and not a.findings:
+        die("audit needs --findings (or --list-agents to see which ids are in the log).")
+    if a.list_agents:
+        # Without this, the skill told an orchestrator to pass --agent and gave it no way to
+        # learn the ids, so the documented loop could not be run at all. The ids are in the
+        # log; what they cannot be is guessed.
+        seen = {}
+        for line in logp.read_text().splitlines():
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            e = seen.setdefault(rec.get("agent") or "(no agent id)",
+                                {"calls": 0, "paths": set()})
+            e["calls"] += 1
+            e["paths"].update(rec.get("paths", []))
+        if not seen:
+            die(f"{logp} holds no usable records.")
+        print(f"agents in {logp}:")
+        for agent, e in sorted(seen.items(), key=lambda kv: -kv[1]["calls"]):
+            print(f"  {agent}   {e['calls']} call(s), {len(e['paths'])} distinct path(s)")
+            for q in sorted(e["paths"])[:6]:
+                print(f"      {q}")
+        print("\nMatch each id to a reviewer by the paths it touched, then audit each findings "
+              "file with that id.\nIf you cannot establish the mapping, do not guess: skip "
+              "`audit` and say in the handover that\nscope honesty was not checked this run.")
+        return
+
+    doc = read_json(a.findings, "findings file")
+    declared = set(doc.get("scope", {}).get("files_read") or [])
+    touched = set()
+    agents_seen = set()
     for line in logp.read_text().splitlines():
         try:
             rec = json.loads(line)
         except ValueError:
             continue
-        if a.agent and rec.get("agent") and rec["agent"] != a.agent:
+        if rec.get("agent"):
+            agents_seen.add(rec["agent"])
+        if a.agent and rec.get("agent") != a.agent:
+            # A record with no agent id is unattributable, so it cannot support anyone's
+            # claim. Previously it supported everyone's.
             continue
         for p in rec.get("paths", []):
             q = (repo / p) if not p.startswith("/") else Path(p)
@@ -1232,10 +1552,25 @@ def cmd_audit(a):
                 touched.add(str(q.resolve().relative_to(repo)))
             except (ValueError, OSError):
                 pass
-    unsupported = sorted(declared - touched)
+    if not a.agent and len(agents_seen) > 1:
+        die(f"this access log holds {len(agents_seen)} distinct agents and no --agent was "
+            "given, so every agent's reads would vouch for this one's claims. Pass --agent "
+            "with the subagent id for this findings file. Agents in the log: "
+            + ", ".join(sorted(agents_seen)[:6]))
+    # A path the reviewer read from outside the repository — the kit's own FINDINGS.md, for
+    # instance — cannot be resolved against the repo and so appeared in `declared` but never
+    # in `touched`, which reported an honest reviewer as making an UNSUPPORTED CLAIM.
+    # `validate` calls reading outside the manifest "not a violation"; the two must agree.
+    outside = sorted(q for q in declared
+                     if q.startswith("/") and not str(Path(q)).startswith(str(repo)))
+    unsupported = sorted(set(declared) - touched - set(outside))
     name = doc.get("reviewer", "?")
-    print(f"audit {name}: declared {len(declared)} files read, access log shows "
-          f"{len(touched & declared)} of them actually touched")
+    checkable = set(declared) - set(outside)
+    print(f"audit {name}: {len(checkable)} of {len(declared)} declared file(s) are checkable "
+          f"against this log; {len(touched & checkable)} of those appear in it")
+    if outside:
+        print(f"  note: {len(outside)} declared path(s) lie outside {repo} and cannot be "
+              "checked against this log: " + ", ".join(outside[:4]), file=sys.stderr)
     if unsupported:
         print(f"  UNSUPPORTED CLAIM: {len(unsupported)} declared file(s) appear in no tool call:")
         for p in unsupported[:20]:
@@ -1250,7 +1585,22 @@ def cmd_summarize(a):
     r = read_json(a.reconciliation, "reconciliation")
     run_dir = Path(a.run_dir) if getattr(a, "run_dir", None) else Path(a.reconciliation).parent
     report_fingerprints(r, run_dir)
+    missing = [k for k in ("run_id", "date", "run_dir", "items") if k not in r]
+    if missing:
+        die(f"reconciliation is missing required top-level key(s): {', '.join(missing)}. "
+            "The shape is {run_id, date, run_dir, head?, machine?, not_reviewed?, "
+            "confidence_note?, revert_cmd?, line_shift_note?, items[]} — see Stage 6 of the "
+            "reconcile-reviews skill.")
     items = r["items"]
+    for i, x in enumerate(items):
+        # Every key the renderer goes on to read without a .get(). It used to check three and
+        # then index five, so a reconciliation missing `defect` died with a KeyError rather
+        # than a sentence naming the item.
+        for k in ("disposition", "fingerprint", "where", "severity", "title", "defect", "fix"):
+            if k not in x:
+                die(f"reconciliation item {i} ({x.get('where', 'no where')}) is missing "
+                    f"'{k}'. Every item needs: disposition, fingerprint, where, severity, "
+                    "title, defect, fix.")
     fixed = [x for x in items if x["disposition"] == "applied"]
     openi = [x for x in items if x["disposition"] == "open"]
     deferred = [x for x in items if x["disposition"] == "deferred"]
@@ -1263,16 +1613,19 @@ def cmd_summarize(a):
     w = L.append
     m = r.get("machine", {})
     w(f"# Review summary — {r['date']} @ {r.get('head', '?')}\n")
-    w(f"**{len(fixed) + len(openi) + len(deferred)} confirmed defects: {len(fixed)} fixed in "
+    w(f"**{len(fixed) + len(openi)} confirmed defects: {len(fixed)} fixed in "
       f"the working tree, {len(openi)} for you "
-      f"({sum(1 for x in openi if x.get('severity') == 'critical')} critical), "
-      f"{len(deferred)} deferred for compute.** "
+      f"({sum(1 for x in openi if x.get('severity') == 'critical')} critical).** "
+      f"{len(deferred)} more are deferred for compute — checkable, but not on this machine. "
       + (f"{len(dropped)} reported finding{'s were' if len(dropped) != 1 else ' was'} "
          "refuted and dropped" if dropped else "Nothing was refuted")
       + (f"; {len(unver)} could not be settled on any machine" if unver else "") + ".")
     w(f"Machine: {m.get('cores')} cores, {m.get('usable_gb')} GB usable, "
       f"{'GPU: ' + ', '.join(m['gpu']) if m.get('gpu') else 'no GPU'}.")
-    w(f"Full detail: `{r['run_dir']}` · revert the fixes: `{r.get('revert_cmd', '—')}`\n")
+    # The run directory is an absolute path under someone's home. This file is committed, so
+    # it names the run instead and lets the reader resolve it: `review.py store --repo .`
+    w(f"Full detail: run `{r.get('run_id', '?')}` under this repository's review store "
+      f"(`review.py store --repo .`) · revert the fixes: `{r.get('revert_cmd', '—')}`\n")
     w("---\n")
 
     w(f"## Fixed ({len(fixed)})\n")
@@ -1280,7 +1633,7 @@ def cmd_summarize(a):
         w("| # | where | defect | fix implemented |")
         w("|---|---|---|---|")
         for i, x in enumerate(fixed, 1):
-            w(f"| {i} | `{x['where']}` | {x['defect']} | {x['fix']} |")
+            w(f"| {i} | `{cell(x['where'])}` | {cell(x['defect'])} | {cell(x['fix'])} |")
     else:
         w("Nothing was applied automatically.")
     if r.get("line_shift_note"):
@@ -1315,7 +1668,7 @@ def cmd_summarize(a):
             w("| where | defect | recommended fix |")
             w("|---|---|---|")
             for x in grp:
-                w(f"| `{x['where']}` | {x['defect']} | {x['fix']} |")
+                w(f"| `{cell(x['where'])}` | {cell(x['defect'])} | {cell(x['fix'])} |")
             w("")
 
     if deferred:
@@ -1339,8 +1692,17 @@ def cmd_summarize(a):
     unchecked = [d for k, d in carried.items()
                  if d.get("status") == "open" and d.get("last_outcome") == "not-re-checked"
                  and k not in here]
-    if missed or unchecked or regressed:
-        w(f"## Still open from earlier runs ({len(missed) + len(unchecked) + len(regressed)})\n")
+    # Every open outcome must surface somewhere. Three of these states were added after this
+    # renderer was written and were dropped in silence, which is how a carried defect
+    # disappears without anyone deciding that it should.
+    undecidable = [d for k, d in carried.items()
+                   if d.get("status") == "open" and k not in here
+                   and d.get("last_outcome") in ("reported-not-carried",
+                                                 "unanchored-not-checkable",
+                                                 "anchor-ambiguous")]
+    if missed or unchecked or regressed or undecidable:
+        w(f"## Still open from earlier runs "
+          f"({len(missed) + len(unchecked) + len(regressed) + len(undecidable)})\n")
         if regressed:
             w(f"### Regressed — fixed once, and the offending code is back ({len(regressed)})\n")
             w("These were confirmed, then resolved in a later run, and the source text they "
@@ -1348,8 +1710,8 @@ def cmd_summarize(a):
             w("| where | severity | defect | first seen |")
             w("|---|---|---|---|")
             for d in sorted(regressed, key=lambda x: order.get(x.get("severity"), 9)):
-                w(f"| `{d.get('where')}` | {d.get('severity')} | {d.get('title')} "
-                  f"| {d.get('first_run')} |")
+                w(f"| `{cell(d.get('where'))}` | {cell(d.get('severity'))} "
+                  f"| {cell(d.get('title'))} | {cell(d.get('first_run'))} |")
             w("")
         if missed:
             w(f"### Reviewed again and not re-reported — but the code has not changed "
@@ -1360,16 +1722,31 @@ def cmd_summarize(a):
             w("| where | severity | defect | first seen |")
             w("|---|---|---|---|")
             for d in sorted(missed, key=lambda x: order.get(x.get("severity"), 9)):
-                w(f"| `{d.get('where')}` | {d.get('severity')} | {d.get('title')} "
-                  f"| {d.get('first_run')} |")
+                w(f"| `{cell(d.get('where'))}` | {cell(d.get('severity'))} "
+                  f"| {cell(d.get('title'))} | {cell(d.get('first_run'))} |")
             w("")
         if unchecked:
             w(f"### Not re-checked this run — file was out of scope ({len(unchecked)})\n")
             w("| where | severity | defect | first seen |")
             w("|---|---|---|---|")
             for d in sorted(unchecked, key=lambda x: order.get(x.get("severity"), 9)):
-                w(f"| `{d.get('where')}` | {d.get('severity')} | {d.get('title')} "
-                  f"| {d.get('first_run')} |")
+                w(f"| `{cell(d.get('where'))}` | {cell(d.get('severity'))} "
+                  f"| {cell(d.get('title'))} | {cell(d.get('first_run'))} |")
+            w("")
+
+        if undecidable:
+            w(f"### Carried forward, state undecided ({len(undecidable)})\n")
+            w("Neither confirmed fixed nor shown still present. Each says which, and why "
+              "nothing here could settle it.\n")
+            w("| where | severity | defect | why undecided |")
+            w("|---|---|---|---|")
+            reason = {"reported-not-carried": "a reviewer filed it; reconciliation did not carry it",
+                      "unanchored-not-checkable": "no source anchor, so presence cannot be tested",
+                      "anchor-ambiguous": "its anchor occurs more than once, so it locates nothing"}
+            for d in sorted(undecidable, key=lambda x: order.get(x.get("severity"), 9)):
+                w(f"| `{cell(d.get('where'))}` | {cell(d.get('severity'))} "
+                  f"| {cell(d.get('title'))} "
+                  f"| {cell(reason.get(d.get('last_outcome'), d.get('last_outcome')))} |")
             w("")
 
     if unver:
@@ -1380,16 +1757,36 @@ def cmd_summarize(a):
 
     w("## Not reviewed\n")
     for x in r.get("not_reviewed", []):
-        w(f"- {x}")
+        w(f"- {bullet(x)}")
     w("")
     w("## Confidence\n")
     w(r.get("confidence_note", ""))
 
-    Path(a.out).write_text("\n".join(L) + "\n")
-    tot = len(fixed) + len(openi) + len(deferred)
-    print(f"summary: {tot} confirmed ({len(fixed)} fixed, {len(openi)} open, "
-          f"{len(deferred)} deferred), {len(dropped)} dropped → {a.out}")
+    write_atomic(Path(a.out), "\n".join(L) + "\n")
+    # Matches the file's own headline, which counts fixed + open. Deferred items are
+    # confirmed as *findings* but not as defects-with-a-verdict, and reporting one total here
+    # and a different one at the top of the file made the two look like a disagreement.
+    print(f"summary: {len(fixed) + len(openi)} confirmed ({len(fixed)} fixed, "
+          f"{len(openi)} open), {len(deferred)} deferred for compute, "
+          f"{len(dropped)} dropped → {a.out}")
     print("counts derived from reconciliation.json; headers cannot disagree with contents")
+
+
+def cell(v) -> str:
+    """One Markdown table cell. A defect that mentions `a | b` used to add a column."""
+    return str(v if v is not None else "").replace("|", "\\|").replace("\n", " ").strip()
+
+
+def bullet(entry) -> str:
+    """Render a not_reviewed entry, which the contract allows as a string or an object.
+
+    Only the string form was handled, so an object arrived in the committed deliverable as a
+    Python dict repr — `{'path': 'data/big.csv', 'reason': ...}` — in the file a human reads.
+    """
+    if isinstance(entry, dict):
+        path, reason = entry.get("path"), entry.get("reason")
+        return f"`{path}` — {reason}" if reason else f"`{path}`"
+    return str(entry)
 
 
 def rate_txt(v):
@@ -1400,9 +1797,10 @@ def cmd_ledger(a):
     r = read_json(a.reconciliation, "reconciliation")
     items = r["items"]
     rows = []
-    reviewers = sorted({rv for x in items for rv in (x.get("corroborated_by") or ["?"])})
+    UNATTRIB = "(unattributed)"
+    reviewers = sorted({rv for x in items for rv in (x.get("corroborated_by") or [UNATTRIB])})
     for rev in reviewers:
-        mine = [x for x in items if rev in (x.get("corroborated_by") or [])]
+        mine = [x for x in items if rev in (x.get("corroborated_by") or [UNATTRIB])]
         conf = sum(1 for x in mine if x["disposition"] in ("applied", "open"))
         ref = sum(1 for x in mine if x["disposition"] == "dropped")
         dfr = sum(1 for x in mine if x["disposition"] == "deferred")
@@ -1412,14 +1810,31 @@ def cmd_ledger(a):
                      "deferred": dfr, "unverifiable": unv,
                      "rate_verifiable": round(conf / (conf + ref), 3) if conf + ref else None,
                      "machine": r.get("machine")})
-    with open(a.out, "a") as f:
-        for row in rows:
-            f.write(json.dumps(row) + "\n")
+    # coverage guards against replay; ledger did not, so re-running the documented Stage 6
+    # block duplicated rows and silently doubled the denominator of every rate.
+    seen = set()
+    outp = Path(a.out)
+    if outp.exists():
+        for line in outp.read_text().splitlines():
+            try:
+                prev = json.loads(line)
+            except ValueError:
+                continue
+            seen.add((prev.get("run_id"), prev.get("reviewer")))
+    fresh = [r for r in rows if (r["run_id"], r["reviewer"]) not in seen]
+    if len(fresh) != len(rows):
+        print(f"  note: {len(rows) - len(fresh)} row(s) for this run are already in the "
+              "ledger and were not appended again (replay).", file=sys.stderr)
+    # One write, not one per row: a crash midway through appending used to leave a partial
+    # line, and every later read of the ledger then skipped the truncated row in silence.
+    if fresh:
+        with open(a.out, "a") as f:
+            f.write("".join(json.dumps(row) + "\n" for row in fresh))
     for row in rows:
         print(f"  {row['reviewer']:18} {row['reported']:3} reported → {row['confirmed']} confirmed, "
               f"{row['refuted']} refuted, {row['deferred']} deferred  "
               f"({rate_txt(row['rate_verifiable'])})")
-    print(f"ledger: {len(rows)} rows appended → {a.out}")
+    print(f"ledger: {len(fresh)} rows appended → {a.out}")
 
 
 # ---------------------------------------------------------------- main
@@ -1433,11 +1848,15 @@ def main():
     p.add_argument("--repo", required=True); p.add_argument("--out", required=True)
     p.add_argument("--since")
     p.add_argument("--full", action="store_true",
-                   help="whole repository (the default when --since is absent)")
+                   help="whole repository. This is already the default; the flag exists so a "
+                        "caller can say so explicitly, and it is an error to combine it with "
+                        "--since")
     p.add_argument("--list", action="store_true")
     p.add_argument("--reference-threshold", type=int, default=500,
-                   help="files longer than this, and all data files, go to the reference "
-                        "tier: described in the manifest, never read (default 500)")
+                   help="line count above which a file is demoted to the reference tier — "
+                        "described in the manifest and queried, never read. Tabular and "
+                        "opaque files are reference-tier at any size; source and Markdown "
+                        "are never demoted however long (default 500)")
     p.set_defaults(fn=cmd_scope)
 
     p = sub.add_parser("machine", help="measure the compute budget")
@@ -1482,10 +1901,18 @@ def main():
     p.add_argument("--reconciliation", required=True); p.add_argument("--out", required=True)
     p.add_argument("--run-id"); p.set_defaults(fn=cmd_carryover)
 
+    p = sub.add_parser("store", help="print this repo's review store path")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--summary", action="store_true",
+                   help="print where REVIEW-SUMMARY.md belongs instead: the repo root on a "
+                        "normal install, the store under --minimal, which writes nothing "
+                        "into the repository")
+    p.set_defaults(fn=cmd_store)
+
     p = sub.add_parser("shield", help="move in-repo conclusions aside for the reviewer stage")
     p.add_argument("--repo", required=True)
     p.add_argument("--hold", help="where to hold them; must be outside the repo "
-                                  "(default ~/.review-kit/<repo>/shield)")
+                                  "(default ~/.review-kit/<repo>-<hash>/shield)")
     p.set_defaults(fn=cmd_shield)
 
     p = sub.add_parser("unshield", help="restore what shield moved")
@@ -1493,8 +1920,13 @@ def main():
     p.set_defaults(fn=cmd_unshield)
 
     p = sub.add_parser("audit", help="check files_read against the harness access log")
-    p.add_argument("--findings", required=True); p.add_argument("--repo", required=True)
-    p.add_argument("--access-log", required=True); p.add_argument("--agent")
+    p.add_argument("--findings"); p.add_argument("--repo", required=True)
+    p.add_argument("--access-log", required=True)
+    p.add_argument("--agent", help="the subagent id whose reads may support this file's "
+                                   "claims; required when the log holds more than one")
+    p.add_argument("--list-agents", action="store_true",
+                   help="print the agent ids in the log with what each touched, so each can "
+                        "be matched to a reviewer. --findings is not needed with this")
     p.set_defaults(fn=cmd_audit)
 
     p = sub.add_parser("summarize", help="render REVIEW-SUMMARY.md from reconciliation.json")

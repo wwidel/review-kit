@@ -11,26 +11,32 @@ Stdlib only.
 """
 from __future__ import annotations
 
-import argparse, json, os, re, shutil, sys
+import argparse, json, os, shutil, sys
 from pathlib import Path
 
 KIT = Path(__file__).resolve().parent.parent
-MATCHER = "Read|Bash|Grep|Glob|Edit|Write"
+# Must cover every tool log_file_access.py knows how to read a path out of; NotebookEdit
+# was handled there and absent here, so notebook reads reached the log from no tool at all.
+MATCHER = "Read|Bash|Grep|Glob|Edit|Write|NotebookEdit"
 
 
 def install_skills(target: Path, link: bool):
     dest = target / ".claude" / "skills"
     dest.mkdir(parents=True, exist_ok=True)
-    done = []
+    done, clashes = [], []
     for skill in sorted((KIT / "skills").iterdir()):
         if not (skill / "SKILL.md").exists():
             continue
         out = dest / skill.name
-        if out.is_symlink() or out.exists():
-            if out.is_symlink():
-                out.unlink()
-            else:
-                shutil.rmtree(out)
+        if out.is_symlink():
+            out.unlink()
+        elif out.exists():
+            # A real directory here is somebody's own skill that happens to share one of our
+            # names — `review-code` is exactly what a person who reviews code would call
+            # theirs. Deleting it is irrecoverable and outside the repo under review, so
+            # refuse and name the collision instead.
+            clashes.append(out)
+            continue
         if link:
             # A symlink keeps one copy of the truth: a `git pull` in the kit updates every
             # repo at once, where copies would be a set of forks drifting apart.
@@ -38,39 +44,43 @@ def install_skills(target: Path, link: bool):
         else:
             shutil.copytree(skill, out)
         done.append(skill.name)
+    if clashes:
+        print(f"error: {len(clashes)} existing skill directory/ies would be overwritten:",
+              file=sys.stderr)
+        for c in clashes:
+            print(f"    {c}", file=sys.stderr)
+        print("These are not the kit's — they are yours, and replacing them would be "
+              "irrecoverable.\nRename or move them, then re-run.", file=sys.stderr)
+        sys.exit(2)
     return dest, done
 
 
+def _review_py():
+    """Load bin/review.py as a module, so the store path has exactly one definition.
+
+    It was copied here and in two places in review.py. Three copies of a path derivation is
+    three chances for an install to point somewhere a review does not look.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("review_kit_review", KIT / "bin" / "review.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def store_path(repo: Path) -> Path:
-    """The one place the external store path is computed. Every caller uses it."""
-    slug = re.sub(r"[^A-Za-z0-9_.-]", "_", repo.name)
-    return (Path.home() / ".review-kit" / slug / "review").resolve()
+    return _review_py().store_path(repo)
 
 
-def install_store(repo: Path, in_repo: bool):
+def install_store(repo: Path):
     """Put the review store outside the repository and symlink it in.
 
     `grep -r` and `rg` skip symlinked directories, so a reviewer sweeping the repo cannot pick
     up a previous run's conclusions, while a person opening a file under `.review/` by path reads
-    it normally. --in-repo keeps a real directory for teams who want the whole store committed
-    and accept that a grep can then reach it.
+    it normally. The store is always external: a real directory inside the repo would put an
+    earlier run's conclusions where the next run's reviewers can read them.
     """
     link = repo / ".review"
-    if in_repo:
-        if link.is_symlink():
-            # Bring the external store's contents in rather than orphaning a defect history
-            # the next run would silently start over from. The reverse direction already
-            # migrates; both should.
-            external = link.resolve()
-            link.unlink()
-            link.mkdir(parents=True, exist_ok=True)
-            if external.is_dir():
-                for item in external.iterdir():
-                    target = link / item.name
-                    if not target.exists():
-                        shutil.move(str(item), str(target))
-        link.mkdir(parents=True, exist_ok=True)
-        return link, None
     store = store_path(repo)
     store.mkdir(parents=True, exist_ok=True)
     if link.is_symlink():
@@ -78,12 +88,23 @@ def install_store(repo: Path, in_repo: bool):
             return link, store
         link.unlink()
     elif link.exists():
-        # A real directory is already there from an earlier install; move its contents rather
-        # than silently abandoning them.
-        for item in link.iterdir():
-            target = store / item.name
-            if not target.exists():
-                shutil.move(str(item), str(target))
+        # A real directory is already there from an earlier install. Move its contents into
+        # the store — but a name that already exists in the store is a genuine conflict
+        # between two histories, and the previous version resolved it by keeping the store's
+        # copy and then rmtree-ing the repo's. That destroyed 40 runs of coverage with no
+        # backup and no message. Refuse instead, and name both sides.
+        clashes = [item.name for item in sorted(link.iterdir()) if (store / item.name).exists()]
+        if clashes:
+            print(f"error: {len(clashes)} file(s) exist BOTH in {link} and in {store}:",
+                  file=sys.stderr)
+            for c in clashes:
+                print(f"    {c}", file=sys.stderr)
+            print("Each is a review history, and this cannot tell which one you want.\n"
+                  "Merge or rename them by hand, then re-run — nothing has been moved or "
+                  "deleted.", file=sys.stderr)
+            sys.exit(2)
+        for item in sorted(link.iterdir()):
+            shutil.move(str(item), str(store / item.name))
         shutil.rmtree(link)
     link.symlink_to(store, target_is_directory=True)
     return link, store
@@ -134,7 +155,11 @@ def install_hook(settings_path: Path, access_root: Path | None):
         post.append({"matcher": MATCHER,
                      "hooks": [{"type": "command", "command": cmd}]})
 
-    settings_path.write_text(json.dumps(cfg, indent=2) + "\n")
+    # Via a temp file and rename: this is the user's settings, and a crash between truncate
+    # and write leaves them with the malformed file this function warns about four lines up.
+    tmp = settings_path.with_name(settings_path.name + ".tmp")
+    tmp.write_text(json.dumps(cfg, indent=2) + "\n")
+    os.replace(tmp, settings_path)
     return cmd
 
 
@@ -149,16 +174,12 @@ def main():
     ap.add_argument("--minimal", action="store_true",
                     help="touch the repository not at all: skills go to ~/.claude/skills so "
                          "they are available everywhere, the review store lives under "
-                         "~/.review-kit/<repo>/, and no symlink, hook or rules file is "
+                         "~/.review-kit/<repo>-<hash>/, and no symlink, hook or rules file is "
                          "written. `review.py audit` is unavailable in this mode.")
     ap.add_argument("--copy", action="store_true",
                     help="copy the skills instead of symlinking them")
     ap.add_argument("--no-hook", action="store_true",
                     help="install skills only; `review.py audit` will then be unavailable")
-    ap.add_argument("--in-repo", action="store_true",
-                    help="keep the review store as a real directory inside the repo instead "
-                         "of symlinking it to ~/.review-kit/<repo>/. Committable, but a "
-                         "reviewer's grep can then reach a previous run's conclusions.")
     ap.add_argument("--with-rules", action="store_true",
                     help="copy the house-rules template into the repo as REVIEW-RULES.md, "
                          "for you to edit or delete. Never overwrites an existing one.")
@@ -171,7 +192,7 @@ def main():
         sys.exit(2)
 
     if a.minimal:
-        ignored = [f for f, on in [("--in-repo", a.in_repo), ("--with-rules", a.with_rules),
+        ignored = [f for f, on in [("--with-rules", a.with_rules),
                                    ("--no-hook", a.no_hook),
                                    ("--session-root", bool(a.session_root))] if on]
         if ignored:
@@ -212,15 +233,10 @@ def main():
               "schedules anything.")
         return
 
-    link, store = install_store(repo, a.in_repo)
-    if store:
-        print(f"store: {link} -> {store}")
-        print("  Outside the repo on purpose: grep -r and rg skip symlinked directories, so a")
-        print("  reviewer sweeping the repository cannot pick up an earlier run's conclusions.")
-    else:
-        print(f"store: {link} (real directory, --in-repo)")
-        print("  A reviewer's grep can reach previous conclusions here. Run `review.py shield`")
-        print("  before the reviewer stage if that matters to you.")
+    link, store = install_store(repo)
+    print(f"store: {link} -> {store}")
+    print("  Outside the repo on purpose: grep -r and rg skip symlinked directories, so a")
+    print("  reviewer sweeping the repository cannot pick up an earlier run's conclusions.")
 
     dest, skills = install_skills(session_root, link=not a.copy)
     print(f"skills: {len(skills)} {'symlinked' if not a.copy else 'copied'} into {dest}")

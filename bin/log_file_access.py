@@ -31,11 +31,22 @@ def looks_like_path(s: str, root: str) -> bool:
 
 def paths_from(tool, inp):
     out = set()
-    for k in ("file_path", "path", "notebook_path"):
+    # `path` on a Grep or Glob is the directory searched, not a file whose contents came back.
+    # Counting it would let one grep vouch for every file under it — the opposite of what
+    # this log is for, and contrary to the note below.
+    keys = ("file_path", "notebook_path") if tool in ("Grep", "Glob") \
+        else ("file_path", "path", "notebook_path")
+    for k in keys:
         if isinstance(inp.get(k), str):
             out.add(inp[k])
     if isinstance(inp.get("command"), str):
-        out |= set(PATHY.findall(inp["command"]))
+        # Only paths given to a command that actually returns file contents. Previously any
+        # path mentioned anywhere in the command line counted, so a reviewer could "read" a
+        # file by naming it in an `ls`, a `rm`, or a command that failed outright.
+        cmd = inp["command"]
+        if re.search(r"\b(cat|head|tail|sed|awk|less|more|grep|rg|python3?|node|jq|wc|diff|"
+                     r"md5sum|sha256sum|nl|strings|xxd|od)\b", cmd):
+            out |= set(PATHY.findall(cmd))
     # A Grep or Glob pattern is deliberately ignored: searching a tree is not reading any
     # particular file, and counting it as one would let a single grep "support" a claim to
     # have read everything it matched.
@@ -65,8 +76,15 @@ def main():
         if rec["paths"]:
             with (logdir / "access.jsonl").open("a") as f:
                 f.write(json.dumps(rec) + "\n")
-    except Exception:
-        pass
+    except Exception as e:
+        # Still never break the session — but leave a trace. A silently failed hook and an
+        # honest reviewer that read nothing produce the same empty log, and `audit` then
+        # accuses the reviewer.
+        try:
+            (logdir / "access.errors").open("a").write(
+                f"{datetime.datetime.now(datetime.timezone.utc).isoformat()} {type(e).__name__}: {e}\n")
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

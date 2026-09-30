@@ -262,10 +262,15 @@ crowding out the ones that matter. Never reach for it to make a report look shor
 Then validate your own file before you hand it over:
 
 ```bash
-python3 <review-kit>/bin/review.py validate --findings <your output path> --repo .
+python3 <review-kit>/bin/review.py validate --findings <your output path> \
+    --manifest <D>/manifest.json
 ```
 
 Fix what it reports. A file that fails validation is re-run, which wastes the whole review.
+
+**Pass `--manifest`, not `--repo`.** Without the manifest the validator cannot see your scope,
+so it checks the shape of your findings and nothing about your coverage — a file declaring it
+read nothing at all would pass.
 
 ## Output
 
