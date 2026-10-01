@@ -62,6 +62,11 @@ a different question, and a verdict built on it would be wrong in a way nobody c
 
 ## Stage 1 — Verify
 
+The findings files present are the legs that ran. A reviewer can be missing because a usage
+limit ended it, and the orchestrator spawns them one at a time precisely so that the rest
+survive — say in your report which legs are present and which are absent, and never let a
+reconciliation over two reviewers read as a reconciliation over four.
+
 Take every finding, in severity order, and reach a verdict. Do not skip the minor ones; a
 `minor` with `certain` confidence is usually cheap to confirm and cheap to fix.
 

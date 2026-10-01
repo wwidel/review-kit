@@ -165,10 +165,21 @@ against it. It is a bookmark, not a timer: nothing reads its age and decides to 
 
 ### Cost
 
-Roughly **880k–970k tokens for a full audit**, with a floor near 145k per reviewer. Cost tracks
-the *protocol*, not the repository: a 1,400-line repo cost 82% of what a 3,600-line one did.
-Trimming the preamble will not rescue this — the preamble is ~18k of that 145k. Plan on one
-audit per usage window.
+Roughly **880k–970k tokens for a full audit** of a repository of a few thousand lines, with a
+floor near 145k per reviewer. Cost tracks the *protocol* far more than the repository at that
+size: a 1,400-line repo cost 82% of what a 3,600-line one did. Trimming the preamble will not
+rescue this — the preamble is ~18k of that 145k.
+
+The protocol stops dominating once the repository is large. A 27,398-line repository estimates
+at **1.85M**, because the source itself is then ~255k per reviewer against that 145k floor. So
+`review.py estimate` runs in Stage 0 and the orchestrator puts the figure in front of the
+person before spawning anything: the first attempt on that repository exhausted a weekly limit
+with four reviewers running concurrently, and all four died before writing a findings file —
+full cost, no artefact.
+
+That is also why reviewers are spawned **one at a time**. Sequential execution gives up
+wall-clock time and buys partial results: a limit then costs the legs that had not started,
+rather than all of them, and the run resumes by skipping whatever already validates.
 
 ---
 

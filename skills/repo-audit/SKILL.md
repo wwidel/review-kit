@@ -56,8 +56,24 @@ python3 <review-kit>/bin/review.py scope --repo . --out $D --list [--since <ref>
 python3 <review-kit>/bin/review.py machine --out $D/machine.json
 python3 <review-kit>/bin/review.py characterize --repo . --out $D/repo_profile.json
 python3 <review-kit>/bin/review.py probe --manifest $D/manifest.json --out $D/probes.json
+python3 <review-kit>/bin/review.py estimate --manifest $D/manifest.json
 cat $STORE/last_review.json 2>/dev/null || echo "no previous review"
 ```
+
+### Show the estimate and WAIT
+
+`estimate` prints the two numbers that decide what this run costs — how many files will be
+read and how many lines they hold — and turns them into a token figure. **Put that figure in
+front of the person and stop.** Do not spawn anything until they say to go ahead.
+
+This is not a formality. A fan-out over a 27,000-line repository was estimated afterwards at
+1.85M tokens; it exhausted a weekly limit and every reviewer died before writing its findings
+file, so the run cost everything and produced nothing. The estimate takes a second and is the
+only point at which that is cheap to avoid.
+
+Say what it would cost, say what the smaller options are — a `--since` window, one fewer
+reviewer leg, a single-purpose skill on the files they actually care about — and let them
+decide. If they decline, stop; there is nothing to clean up but the `unshield`.
 
 `scope` writes `manifest.json` in **three tiers**. The *review tier* is read in full: source,
 Markdown, and anything else under the threshold. The *reference tier* is tabular data at any
@@ -132,16 +148,56 @@ before shielding again, so the file is never orphaned.
 `rg` skip symlinked directories. Only the summary needs moving — unless the store was installed
 everything.)
 
-Spawn all four in **one message** so they run concurrently, each in its own fresh context.
+### Spawn them ONE AT A TIME, never in parallel
+
+Launch one reviewer, wait for it to finish, harvest and validate its file, and only then
+launch the next. Parallelism buys wall-clock time and loses the whole run when a usage limit
+lands partway through: four concurrent reviewers over a large repository hit a weekly limit
+together and all four died before writing anything, so the run cost its full budget and left
+no artefact at all. Run sequentially and a limit costs you the reviewers that had not started
+yet — the ones that finished have their findings on disk, and the run can be resumed.
+
+**Resume rather than restart.** Before launching each leg, check whether its findings file is
+already there and already validates:
+
+```bash
+for leg in code analysis docs fresh-eyes; do
+  f=$D/findings-$leg.json
+  if [ -s "$f" ] && python3 <review-kit>/bin/review.py validate \
+        --findings "$f" --manifest $D/manifest.json >/dev/null 2>&1; then
+    echo "$leg: already done, skipping"
+  else
+    echo "$leg: to run"
+  fi
+done
+```
+
+A leg that is already done is not run again. Re-running one costs its full price and buys a
+second opinion from the same reviewer, which is worth nothing — it is the *other* legs that
+make this an audit.
+
+Order them so that the most valuable leg goes first, because it is the one most likely to
+survive a limit: **fresh-eyes, then code, then analysis, then docs.** Fresh-eyes leads because
+it is the only leg that can find an error *of* the stated intent rather than within it, and
+because nothing else in this design would notice what it misses.
+
 **All four run on Opus.** Review is the work this kit exists to do; a cheaper model on any
 leg buys nothing worth having and makes a disagreement uninterpretable — you cannot tell a
 genuine catch from a capability gap.
+
+If a limit does land mid-run, say so plainly in the handover: which legs produced findings,
+which did not, and that the reconciliation covers only the legs that ran. A partial audit
+honestly labelled is useful. A partial audit presented as a full one is the clean report over
+unread code that this whole design exists to prevent.
 
 Non-negotiable properties. Every one of these has a way of eroding under time pressure, and
 each erosion silently converts this into an ordinary single-agent review:
 
 - **No reviewer sees another's output, prompt, or existence.** Do not tell them they are part of
   an audit, do not mention what the others cover, and do not pass one's findings to another.
+  Running them one after another does not change this: the second reviewer must not be told
+  that a first one ran, still less what it found. Sequential execution is a budget decision,
+  not a pipeline — independence is unaffected because each context starts empty either way.
 - **Each writes to its own file** in `$STORE/runs/$RUN/` and prints only a one-line summary.
 - **No reviewer edits anything.** Concurrent edits would invalidate the line numbers the others
   are citing at that moment, and the reconciler needs an unmodified tree to verify against.

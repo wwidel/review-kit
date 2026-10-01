@@ -131,15 +131,27 @@ def shield_path(repo: Path) -> Path:
     return (Path.home() / ".review-kit" / repo_slug(repo) / "shield").resolve()
 
 
-def installed_in_repo(repo: Path) -> bool:
-    """Did an install put anything inside this repository?
+# What a real review store contains. A directory holding none of these is not a store.
+STORE_MARKERS = ("runs", "coverage.json", "open_defects.json", "ledger.jsonl",
+                 "last_review.json")
 
-    One test, used by both `store` and `store --summary`, because they disagreed: `store`
-    accepted a real `.review/` directory while `--summary` looked only for a symlink, so a
-    repo with the former was told its store was in the repo and its summary was not.
+
+def installed_in_repo(repo: Path) -> bool:
+    """Did an install put a review store inside this repository?
+
+    A symlink is one — that is the only thing install.py creates. A real directory counts
+    only if it actually holds store content, because the access-log hook creates a bare
+    `.review/` in whatever directory a session happens to be working in. Treating that as an
+    install put an entire run inside the repository being audited, where a reviewer's
+    `grep -r` reaches last run's conclusions — defeating the one property the external store
+    exists to buy. An empty `.review/`, or one holding only `access.jsonl`, is not an install.
     """
     link = repo / ".review"
-    return link.is_symlink() or link.exists()
+    if link.is_symlink():
+        return True
+    if not link.is_dir():
+        return False
+    return any((link / m).exists() for m in STORE_MARKERS)
 
 
 def summary_path(repo: Path) -> Path:
@@ -377,6 +389,93 @@ def cmd_scope(a):
     if not review:
         print("EMPTY SCOPE — do not review nothing.", file=sys.stderr)
         sys.exit(3)
+
+
+# ---------------------------------------------------------------- estimate
+
+# Measured once, from the development runs recorded in DESIGN.md: a reviewer costs roughly
+# 145k tokens before it has read a single line of the repository — the contract, its skill,
+# the probe table, its own reasoning and its output. The reconciler costs less source and
+# more verification. These are the kit's own one-off measurements, not a general law, and
+# --floor / --reconciler exist so a run that measures its own can say so.
+REVIEWER_FLOOR = 145_000
+RECONCILER_COST = 250_000
+DEFAULT_REVIEWERS = 4
+
+# Characters per token. English prose runs near 4; code is denser — more punctuation, more
+# short identifiers — so 3.5 is the working figure and the range below is deliberately wide.
+CHARS_PER_TOKEN = 3.5
+
+
+def human(n):
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.0f}k"
+    return str(n)
+
+
+def cmd_estimate(a):
+    """Count what a full review would actually read, and price it, BEFORE anything is spawned.
+
+    A fan-out of four Opus reviewers over a large repository can exhaust a weekly limit before
+    the first one writes its findings file — full cost, no artefact. The two numbers that
+    decide that are the file count and the line count, and both are already in the manifest.
+    """
+    man = read_json(a.manifest, "manifest")
+    repo = Path(man.get("repo", "?"))
+    review = man.get("files", [])
+    ref = man.get("reference", [])
+    files, lines = len(review), sum(f.get("lines", 0) for f in review)
+
+    chars = 0
+    missing = 0
+    for f in review:
+        q = repo / f["path"]
+        try:
+            chars += q.stat().st_size
+        except OSError:
+            missing += 1
+    src = int(chars / a.chars_per_token)
+
+    n = a.reviewers
+    per_reviewer = a.floor + src
+    reviewers_total = n * per_reviewer
+    total = reviewers_total + a.reconciler
+
+    print(f"estimate for {repo}")
+    print(f"  review tier      {files:>6} files, {lines:>7} lines, {human(chars)} characters"
+          + (f"  ({missing} unreadable, not counted)" if missing else ""))
+    if ref:
+        print(f"  reference tier   {len(ref):>6} files — described and queried, never read, "
+              "so they cost almost nothing")
+    print(f"  source in context ~{human(src)} tokens, for a reviewer that reads all of it")
+    print()
+    print(f"  {n} reviewer(s) x ({human(a.floor)} protocol floor + {human(src)} source)"
+          f" = {human(reviewers_total)}")
+    print(f"  reconciler                                          = {human(a.reconciler)}")
+    print(f"  {'-' * 58}")
+    print(f"  ESTIMATED TOTAL                                       {human(total)} tokens")
+    print()
+    print(f"  Basis: {a.chars_per_token} characters per token; a {human(a.floor)} floor per "
+          f"reviewer and {human(a.reconciler)} for the reconciler,")
+    print("  measured once from this kit's own development runs (see DESIGN.md). It is an "
+          "ESTIMATE, not a")
+    print("  measurement of this run, and a reviewer that reads only part of its scope costs "
+          "less.")
+    print()
+    print("  STOP HERE if that is more than you want to spend. Smaller options, in order of "
+          "how much they save:")
+    print("    · review a window instead of everything:  scope --since <ref>")
+    print("    · drop a reviewer leg (never fresh-eyes): estimate --reviewers 3")
+    print("    · run one single-purpose skill on the files you actually care about")
+
+    if a.budget is not None:
+        if total > a.budget:
+            print()
+            die(f"estimated {human(total)} exceeds the stated budget of {human(a.budget)}. "
+                "Narrow the scope or raise the budget deliberately.", code=3)
+        print(f"\n  within the stated budget of {human(a.budget)}.")
 
 
 # ---------------------------------------------------------------- machine
@@ -1858,6 +1957,20 @@ def main():
                         "opaque files are reference-tier at any size; source and Markdown "
                         "are never demoted however long (default 500)")
     p.set_defaults(fn=cmd_scope)
+
+    p = sub.add_parser("estimate", help="price a full review BEFORE spawning anything")
+    p.add_argument("--manifest", required=True)
+    p.add_argument("--reviewers", type=int, default=DEFAULT_REVIEWERS,
+                   help=f"how many reviewer legs (default {DEFAULT_REVIEWERS})")
+    p.add_argument("--floor", type=int, default=REVIEWER_FLOOR,
+                   help="tokens a reviewer costs before reading any source "
+                        f"(default {REVIEWER_FLOOR})")
+    p.add_argument("--reconciler", type=int, default=RECONCILER_COST,
+                   help=f"tokens for the reconciler stage (default {RECONCILER_COST})")
+    p.add_argument("--chars-per-token", type=float, default=CHARS_PER_TOKEN)
+    p.add_argument("--budget", type=int,
+                   help="exit 3 if the estimate exceeds this many tokens")
+    p.set_defaults(fn=cmd_estimate)
 
     p = sub.add_parser("machine", help="measure the compute budget")
     p.add_argument("--out"); p.set_defaults(fn=cmd_machine)

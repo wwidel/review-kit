@@ -285,6 +285,7 @@ half, not the judgement half.
 | `fingerprint` | stamps a stable id from the file path and a normalised source anchor, so a defect keeps its identity across runs even when lines move |
 | `cluster` | groups findings that share a fingerprint (corroboration) and lists near-misses as candidates for the reconciler to judge |
 | `match` | which defects also appeared in the previous run and are still open |
+| `estimate` | counts the files and lines a full review would read and prices it in tokens, before anything is spawned. `--budget N` exits non-zero when the estimate exceeds N |
 | `store` | prints this repo's review store, and with `--summary` where `REVIEW-SUMMARY.md` belongs — the repo root normally, the store under `--minimal`. Derive it; never hard-code either |
 | `shield` / `unshield` | move `REVIEW-SUMMARY.md` outside the repo for the reviewer stage and back afterwards; refuses a hold inside the repo, and recovers an interrupted shield |
 | `coverage` | per-(file, reviewer) record of what has been reviewed, at which sha256, and how stale each file is; names files never reviewed |
