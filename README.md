@@ -20,10 +20,15 @@ python3 ~/tools/review-kit/bin/install.py --repo ~/code/some-project
 
 Then **start a new session in that repository** and type `/repo-audit`.
 
-**It writes nothing inside the repository.** Skills go to `~/.claude/skills/`, the access-log
-hook to `~/.claude/settings.json`, and every artefact a review produces to
-`~/.review-kit/<repo>-<hash>/`. The only file that ever lands in your working tree is the
-summary, written at the end of a run, which is the deliverable and meant to be committed.
+**Two files ever land in your working tree, and you choose both.** Skills go to
+`~/.claude/skills/`, the access-log hook to `~/.claude/settings.json`, and every artefact a
+review produces to `~/.review-kit/<repo>-<hash>/`. Inside the repository you get:
+
+- `REVIEW-SUMMARY.md`, written at the end of a run — the deliverable, meant to be committed.
+  Nothing writes it until you have run a review.
+- `REVIEW-RULES.md`, only if you pass `--with-rules`, and never over an existing file.
+
+A plain `install.py --repo <path>` writes nothing into the repository at all.
 
 ### The one rule
 
@@ -40,21 +45,19 @@ it never opened.
 
 | path | what |
 |---|---|
-| `~/.claude/skills/` | the seven skills, symlinked (or copied with `--copy`) |
+| `~/.claude/skills/` | the seven skills, symlinked into the kit |
 | `~/.claude/settings.json` | one `PostToolUse` hook line, naming no repository |
 | `~/.review-kit/<repo>-<hash>/` | that repository's store and config |
 | `~/.review-kit/installed-skills.json` | which skill names this kit owns |
-| the repository | **nothing**, until a run writes the summary |
+| the repository | **nothing** — unless you pass `--with-rules`, which adds `REVIEW-RULES.md`. A run later writes the summary |
 
 Installing for another repository is the same command with a different `--repo`. It rewrites
 the same global skills and the same hook line — identical both times — and creates a second
 store. The first repository is untouched.
 
-Other flags: `--copy` copies the skills instead of symlinking them (the default symlink keeps
-one copy of the truth, so a `git pull` in the kit updates every repository at once);
-`--no-hook` skips the access hook, which makes `review.py audit` unavailable; `--with-rules`
-copies the house-rules template in as `REVIEW-RULES.md`, the one flag that writes into the
-repository. `--uninstall` removes the skills this kit installed and nothing else — your stores,
+Other flags: `--no-hook` skips the access hook, which makes `review.py audit` unavailable;
+`--with-rules` copies the house-rules template in as `REVIEW-RULES.md`, the one flag that
+writes into the repository, and it never overwrites an existing file. `--uninstall` removes the skills this kit installed and nothing else — your stores,
 summaries and the hook line stay.
 
 ### Two things it cannot promise you

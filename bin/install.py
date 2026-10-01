@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Install the review kit for a repository.
 
-The kit is external to the repository it reviews, and `install.py` writes **nothing** inside
-it. Skills go to `~/.claude/skills/`, the access-log hook to `~/.claude/settings.json`, and
-every artefact a review produces to `~/.review-kit/<repo>-<hash>/`. The only file that ever
-lands in the repository is the summary, written at the end of a run, which is the deliverable.
+The kit is external to the repository it reviews. Skills go to `~/.claude/skills/`, the
+access-log hook to `~/.claude/settings.json`, and every artefact a review produces to
+`~/.review-kit/<repo>-<hash>/`. A plain install writes nothing inside the repository; only
+`--with-rules` does, placing REVIEW-RULES.md there and never over an existing file. The
+summary is written later, by a run, and is the deliverable.
 
 That is possible because of one rule the kit depends on: **a review runs from a session
 started in the repository being reviewed.** The hook then needs no configuration at all — its
@@ -267,8 +268,10 @@ def main():
               "/hooks once or restart the\n        session, because the settings watcher may "
               "not pick up a file it did not see at start.")
 
-    print(f"\nNothing was written inside {repo}."
-          + (" (--with-rules added REVIEW-RULES.md.)" if a.with_rules else ""))
+    if a.with_rules:
+        print(f"\nInside {repo} this install wrote one file: REVIEW-RULES.md.")
+    else:
+        print(f"\nNothing was written inside {repo}.")
     print(f"The summary will be written to {repo / summary} at the end of a run — a real, "
           "committable file.")
     print("It stays in the repository during a review; reviewers are instructed not to read "
