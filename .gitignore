@@ -1,5 +1,6 @@
-# Written by the hook when a review runs with the kit's own directory as the access root.
-# Review state belongs in the repository under review, never here.
+# Left behind by an older version of the hook, which wrote `.review/` into whatever
+# directory a session was working in. The current hook writes only to the external store
+# and creates nothing here, but the rule stays: it costs nothing and catches the leftovers.
 .review/
 
 __pycache__/

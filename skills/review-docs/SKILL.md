@@ -158,7 +158,8 @@ Report defects; cite a rule only where one genuinely applies.
 
 ## Before you write the file
 
-Two fields decide how your findings are treated, and both are easy to get lazily wrong:
+Three fields decide how your findings are treated, and each is easy to get lazily wrong.
+`<review-kit>/FINDINGS.md` is the canonical statement of all three; this is the summary:
 
 - **Opaque files are listed, never opened.** Decks, PDFs, spreadsheets, images, archives and
   model artefacts appear in the manifest with `kind: "opaque"`. Do not read them, do not

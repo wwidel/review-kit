@@ -1,7 +1,8 @@
 ---
 name: repo-audit
 description: Whole-repository review for Python data-analysis and machine-learning repos.
-  Runs four independent reviewers in parallel fresh contexts — blinded fresh-eyes, code
+  Runs four independent reviewers one at a time, each in a fresh context — blinded
+  fresh-eyes, code
   correctness, analytical validity, document integrity — then a fresh reconciler that
   re-verifies every claim, applies only what it confirmed, and reports the rest. Invoke ONLY
   when the user explicitly asks for a review; never start it on your own judgement, on a
@@ -144,7 +145,7 @@ prompts too — not as an invitation to use it, but so reviewers phrase deferred
 No reviewer and no reconciler runs heavy work anywhere during a review. A review is a read of a
 state, not a re-run of the project. (`M-2`, `M-4`)
 
-## Stage 1 — Four reviewers, in parallel, blind to each other
+## Stage 1 — Four reviewers, one at a time, blind to each other
 
 `REVIEW-SUMMARY.md` is a real, committed file, so `grep -r` and `rg` find it — and a reviewer
 that reads last run's summary is no longer independent, which is the single property this whole
@@ -369,7 +370,6 @@ Relay the reconciler's report to the user. Add nothing of your own except:
 - Any reviewer that failed validation and was re-run, and whether it passed the second time.
 - Anything the scope audit flagged as an unsupported `files_read` claim.
 - Anything `coverage` reports as never reviewed or badly stale.
-  protected or merely requested.
 - **Every defect the reconciler classified as `missed`** — confirmed in an earlier run, its file
   reviewed again this run, its source unchanged, and not re-reported. That is a reviewer false
   negative and it is the most important line in the report.

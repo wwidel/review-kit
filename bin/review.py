@@ -149,8 +149,8 @@ def config_path(repo: Path) -> Path:
 
     Two facts have to survive between `install.py` and a run days later, and neither can be
     recomputed. The first is where the kit itself lives: every skill says
-    `<review-kit>/bin/review.py` and nothing else records what that resolves to — with
-    skills are symlinks into it, but nothing should have to resolve a symlink to find out.
+    `<review-kit>/bin/review.py`, and nothing else records what that resolves to. The skills
+    are symlinks into the kit, but nothing should have to resolve one to find out.
     The second is which filename this
     repository's summary claimed, because the obvious one may already have been taken by a
     file that is not ours.
@@ -377,14 +377,13 @@ def cmd_scope(a):
             # It passed the walk and became unreadable since, or arrived through --since.
             unreadable.append(p)
             continue
-        ext_ = p.suffix.lower()
-        n = 0 if ext_ in OPAQUE_EXT or ext_ in BINARY_TABULAR_EXT else count_lines(p)
         # Tabular data is reference-tier at any size, and an opaque file can never be read
         # at all; .json is neither, because a 20-line config is something a reviewer must
-        # actually read. Length decides for everything else.
+        # actually read. Length decides for everything else. One lower-cased suffix, compared
+        # against sets that are themselves lower-cased at definition.
         ext = p.suffix.lower()
-        is_code = (p.suffix in CODE_EXT or ext in {e.lower() for e in CODE_EXT}
-                   or ext in PROSE_EXT)
+        n = 0 if ext in OPAQUE_EXT or ext in BINARY_TABULAR_EXT else count_lines(p)
+        is_code = ext in CODE_EXT or ext in PROSE_EXT
         if is_code and n > a.reference_threshold:
             oversized.append((rel, n))
         if ext in TABULAR_EXT or ext in OPAQUE_EXT or (n > a.reference_threshold

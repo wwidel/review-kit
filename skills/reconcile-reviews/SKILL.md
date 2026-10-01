@@ -41,6 +41,7 @@ except the summary. Resolve it rather than assuming it:
 ```bash
 STORE=$(python3 <review-kit>/bin/review.py store --repo .)
 SUMMARY=$(python3 <review-kit>/bin/review.py store --repo . --summary)
+D=$STORE/runs/<RUN>          # the run id you were given; every command below needs it
 ```
 
 `$SUMMARY` is where the deliverable belongs **for this install**, and it is not always
@@ -197,7 +198,7 @@ APPLIED (4)
   src/pkg/io.py:41        unclosed file handle on the error path        [C-7]
   docs/RESULTS.md:88      broken link to a renamed script               [—]
   ...
-  Revert all: cp -r $STORE/runs/<RUN>/pre/. .
+  Revert all: cp -a $STORE/runs/<RUN>/pre/. .
 
 NEEDS YOU (14, most consequential first)
   ● CRITICAL  src/pkg/refit.py:88                                       [C-4]

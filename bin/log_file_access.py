@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""PostToolUse hook: append every file a tool touched to .review/access.jsonl.
+"""PostToolUse hook: append every file a tool touched to that repository's access log.
 
-Wire it into settings.json (see review-kit/README.md). Reviewers cannot see or write this
-log, so `review.py audit` can compare it against what a reviewer *claimed* to read.
-This is the only check in the kit that a lying agent cannot defeat from inside its
-own context: the record is written by the harness, not by the agent.
+Wired once, globally, with no configuration (see review-kit/README.md). It writes to
+`~/.review-kit/<repo>-<hash>/review/access.jsonl` for whichever repository the session is
+working in, and **writes nothing at all for a directory that has no store** — so it is inert
+everywhere the kit was not installed, and nothing is ever created inside the repository under
+review.
+
+Reviewers cannot see or write this log, so `review.py audit` can compare it against what a
+reviewer *claimed* to read. This is the only check in the kit that a lying agent cannot defeat
+from inside its own context: the record is written by the harness, not by the agent. `audit`
+ignores records older than the run it is checking, because an append-only log would otherwise
+let a read from weeks ago vouch for a file this run never opened.
 
 Never fails the tool call — a broken hook must not break the session.
 """

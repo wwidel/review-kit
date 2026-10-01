@@ -19,8 +19,8 @@ it is defending against, and what has actually been measured rather than hoped f
                        ▼          ▼          ▼          ▼
   STAGE 1        ┌──────────┐┌─────────┐┌──────────┐┌─────────┐
   four fresh     │fresh-eyes││  code   ││ analysis ││  docs   │   ── none sees another
-  contexts,      │ NO DOCS  ││correct- ││ numbers  ││ prose   │      none edits anything
-  in parallel    │          ││  ness   ││ ↔ scripts││         │      all on Opus
+  contexts, one  │ NO DOCS  ││correct- ││ numbers  ││ prose   │      none edits anything
+  at a time      │          ││  ness   ││ ↔ scripts││         │      all on Opus
                  └────┬─────┘└────┬────┘└────┬─────┘└────┬────┘
                       └───────────┴──────────┴───────────┘
                                    │  findings-*.json   (one schema, evidence required)
@@ -67,7 +67,7 @@ disagreements that carry the signal never appear.
 
 This is fragile in practice and has to be defended by construction. Twice a reviewer swept the
 repository with `grep -r` and picked up a previous run's `REVIEW-SUMMARY.md`. Both disclosed it; that
-is lucky, not a control. So the review store lives outside the repository behind a symlink, and
+is lucky, not a control. So the review store lives wholly outside the repository, and
 every reviewer is told by name not to read the summary.
 
 ### 2. One reviewer is blinded
@@ -199,8 +199,11 @@ what gives you figures for *your* repository, and those do have a source.
 
 ## Known limits
 
-- **`grep -R` and direct paths still reach the review store.** The symlink defeats `grep -r`,
-  `rg` and `find`; it is a large reduction, not a guarantee.
+- **The summary is still in the working tree, and so is its history.** Everything else a
+  review produces lives under `~/.review-kit/`, which no sweep of the repository reaches —
+  but `REVIEW-SUMMARY.md` is deliberately committed, so `grep -r`, `git show HEAD:<name>` and
+  `git log -p` all serve a previous run's conclusions. Reviewers are told by name not to read
+  it. That instruction is the control, and an instruction is weaker than a construction.
 - **`audit` has never run inside a live review.** Both halves are tested on fixtures — the hook
   writes the log, and `audit` fails a claimed read that the log does not support — but the two
   have never been joined by a real reviewer session. The hook must be in the settings file of
@@ -217,4 +220,9 @@ what gives you figures for *your* repository, and those do have a source.
   of a handful of recognised build files (`Makefile`, `Dockerfile`, …) enters no tier. It is
   recorded under `unclassified` in the manifest rather than dropped silently, but nothing
   reviews it.
+- **The bookkeeping has no test suite and no CI.** `bin/` is roughly 2,650 lines of Python,
+  and the section above argues that every failure this kit has had came from that half rather
+  than from the judgement half — yet every regression in it has been caught by running a
+  review, not by a check that runs on its own. The fixtures in this repository's history live
+  in commit messages, not in a suite.
 - **Nothing measures whether a *confirmation* was earned** — only whether a refutation was.

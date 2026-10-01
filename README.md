@@ -164,6 +164,7 @@ Individually, when a full audit is more than you need:
 
 ```
 /review-docs docs/RESULTS.md     # one file
+/review-analysis REPORT.md       # are the numbers in it true
 /review-code --full              # correctness only
 /review-tests                    # does the test suite defend what actually breaks
                                  # (not part of /repo-audit — run it separately)
@@ -196,11 +197,12 @@ the mechanical checks, contract validation, fingerprints, clustering, coverage, 
 the ledger. Every failure this kit has actually suffered was in the bookkeeping half, never the
 judgement half.
 
-Four things carry the design, and **[DESIGN.md](DESIGN.md) explains each with the evidence
+Five things carry the design, and **[DESIGN.md](DESIGN.md) explains each with the evidence
 behind it**: independence enforced by construction rather than by instruction; one reviewer
 blinded to the documentation, so it can find errors *of* the intent rather than only within it;
-every finding carrying re-runnable evidence, with severity and confidence kept separate; and a
-reconciler that re-runs, re-reads and re-derives instead of summarising.
+every finding carrying re-runnable evidence, with severity and confidence kept separate; a
+compute budget measured before anything runs, so heavy work is flagged rather than attempted;
+and a reconciler that re-runs, re-reads and re-derives instead of summarising.
 
 DESIGN.md also carries what has been measured: ten planted false findings, all ten refuted; a
 repeat run putting an upper bound on the miss rate; and the cost, which tracks the protocol
@@ -292,6 +294,8 @@ Four rules do most of the work in this repo class:
 
 ```
 review-kit/
+  README.md                         this — install, run, the commands
+  DESIGN.md                         how it works, why, what has been measured, known limits
   PRACTICES.md                      portable rules, with stable IDs reviewers cite
   FINDINGS.md                       the JSON contract every reviewer emits
   CLAUDE.md.snippet                 working rules to paste into a project CLAUDE.md
@@ -303,7 +307,7 @@ review-kit/
     log_file_access.py              PostToolUse hook backing `review.py audit`
     install.py                      puts the skills and the hook where they must be
   skills/
-    repo-audit/SKILL.md     orchestrator — the entry point
+    repo-audit/SKILL.md             orchestrator — the entry point
     review-fresh-eyes/SKILL.md      blinded leg — code and data, no documentation
     review-code/SKILL.md            correctness leg
     review-analysis/SKILL.md        analytical-validity leg
@@ -316,9 +320,8 @@ review-kit/
 
 Every command that needs to know which repository it is working on reads that from the
 manifest or run directory it was given, so none of them depends on the shell's current
-directory. `scope` and `characterize` require `--repo` because at that point nothing has
-recorded it yet, and `audit` requires it because no manifest is
-in play for them to read it from. This matters when the kit and the repository under review
+directory. Five require `--repo` — `preflight`, `store`, `scope`, `characterize` and `audit` — because
+at those points there is no manifest or run directory for them to read it from. This matters when the kit and the repository under review
 are different checkouts: you can drive a review of any repo from anywhere, and pointing a
 command at the wrong tree takes a deliberate `--repo` override.
 
@@ -339,9 +342,10 @@ half, not the judgement half.
 | `cluster` | groups findings that share a fingerprint (corroboration) and lists near-misses as candidates for the reconciler to judge |
 | `match` | which defects also appeared in the previous run and are still open |
 | `estimate` | counts the files and lines a full review would read and prices it in tokens, before anything is spawned. `--budget N` exits non-zero when the estimate exceeds N |
-| `store` | prints this repo's review store; `--summary` the summary's claimed filename at the repo root; `--kit` where the kit itself lives. All three come from the install record — derive them, never hard-code them |\n| `preflight` | checks the conditions a review depends on — that the session is inside the repository under review, that the kit is installed for it, whether the hook is wired — and refuses otherwise |
+| `store` | prints this repo's review store; `--summary` the summary's claimed filename at the repo root; `--kit` where the kit itself lives. All three come from the install record — derive them, never hard-code them |
+| `preflight` | checks the conditions a review depends on — that the session is inside the repository under review, that the kit is installed for it, whether the hook is wired — and refuses otherwise |
 | `coverage` | per-(file, reviewer) record of what has been reviewed, at which sha256, and how stale each file is; names files never reviewed |
-| `carryover` | tracks confirmed defects across runs and classifies each as re-reported, not-re-checked, plausibly-fixed, or **missed** |
+| `carryover` | tracks confirmed defects across runs and classifies each into one of eleven outcomes — `re-reported`, `not-re-checked`, `plausibly-fixed`, `file-deleted`, `fixed-this-run`, `refuted-this-run`, `regressed`, `reported-not-carried`, `unanchored-not-checkable`, `anchor-ambiguous`, and **`missed`**. The reconcile-reviews skill says which of them need a human |
 | `summarize` | renders `REVIEW-SUMMARY.md` from `reconciliation.json`, so no count in it can disagree with the items beneath it |
 | `ledger` | appends per-reviewer confirmed/refuted/deferred rows, with rates computed over verifiable findings |
 
@@ -355,7 +359,7 @@ being checked. In `.claude/settings.json`:
 {
   "hooks": {
     "PostToolUse": [
-      { "matcher": "Read|Bash|Grep|Glob|Edit|Write",
+      { "matcher": "Read|Bash|Grep|Glob|Edit|Write|NotebookEdit",
         "hooks": [{ "type": "command",
                     "command": "python3 <review-kit>/bin/log_file_access.py" }] }
     ]
