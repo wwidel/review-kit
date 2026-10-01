@@ -1392,6 +1392,8 @@ def cmd_coverage(a):
     cov = _load_json(cov_path, {"files": {}, "runs": []})
     cov.setdefault("files", {})
     cov.setdefault("runs", [])
+    # No reconciliation exists yet at this stage, so the directory name is the only source —
+    # which is also the canonical one that resolve_run_id holds the other stages to.
     run_id = a.run_id or run.name
 
     review_tier = {f["path"]: f for f in man.get("files", [])}
@@ -1479,15 +1481,46 @@ def cmd_coverage(a):
         print(f"    stale ({atleast}{n} run(s))  {p_}")
 
 
+def resolve_run_id(rec, run_dir=None, explicit=None):
+    """Settle what this run is called, and refuse when two records disagree.
+
+    Three persistent files key on a run id — coverage, open_defects and the ledger — and they
+    reached it by two different routes: the run directory's basename for the first two, the
+    reconciliation's own `run_id` for the third. When those differ, replay guards, `first_run`
+    and `recurring_since` end up in incompatible namespaces and nothing notices.
+
+    The directory name is canonical, because the orchestrator creates it and the reconciler
+    merely copies the value into its file. A mismatch is therefore a transcription error, and
+    this kit exists to catch exactly that kind of silence rather than paper over it.
+    """
+    from_dir = Path(run_dir).name if run_dir else None
+    from_rec = rec.get("run_id") if rec else None
+    rec_dir = Path(rec["run_dir"]).name if rec and rec.get("run_dir") else None
+
+    for label, a_, b_ in (("the reconciliation's run_id and its own run_dir", from_rec, rec_dir),
+                          ("the reconciliation's run_id and the run directory", from_rec, from_dir)):
+        if a_ and b_ and a_ != b_ and not explicit:
+            die(f"{label} disagree: {a_!r} vs {b_!r}. A run has one id — coverage, "
+                "open_defects and the ledger all key on it, and two namespaces mean the "
+                "replay guards and the carried-forward history silently stop matching. Fix "
+                "the reconciliation, or pass --run-id deliberately.")
+    if explicit:
+        if from_dir and explicit != from_dir:
+            print(f"  note: --run-id {explicit!r} overrides the run directory name "
+                  f"{from_dir!r}.", file=sys.stderr)
+        return explicit
+    return from_rec or from_dir
+
+
 def cmd_carryover(a):
     """Merge a reconciliation into the persistent open-defect record, and classify each
     previously-open defect against the current source."""
     run = Path(a.run_dir).resolve()
     repo = repo_from(run_dir=run, override=a.repo)
-    run_id = a.run_id or run.name
     rec = _load_json(a.reconciliation)
     if not rec:
         die(f"no reconciliation at {a.reconciliation}")
+    run_id = resolve_run_id(rec, run_dir=run, explicit=a.run_id)
     report_fingerprints(rec, run)
     man = _load_json(run / "manifest.json")
     reviewed = {f["path"] for f in man.get("files", [])}
@@ -2144,6 +2177,7 @@ def cmd_ledger(a):
     r = read_json(a.reconciliation, "reconciliation")
     if "items" not in r:
         die(f"{a.reconciliation} has no `items` key, so there is nothing to tally.")
+    run_id = resolve_run_id(r, run_dir=a.run_dir, explicit=a.run_id)
     items = r["items"]
     rows = []
     UNATTRIB = "(unattributed)"
@@ -2154,7 +2188,7 @@ def cmd_ledger(a):
         ref = sum(1 for x in mine if x["disposition"] == "dropped")
         dfr = sum(1 for x in mine if x["disposition"] == "deferred")
         unv = sum(1 for x in mine if x["disposition"] == "unverifiable")
-        rows.append({"run_id": r["run_id"], "date": r["date"], "reviewer": rev,
+        rows.append({"run_id": run_id, "date": r["date"], "reviewer": rev,
                      "reported": len(mine), "confirmed": conf, "refuted": ref,
                      "deferred": dfr, "unverifiable": unv,
                      "rate_verifiable": round(conf / (conf + ref), 3) if conf + ref else None,
@@ -2319,6 +2353,9 @@ def main():
 
     p = sub.add_parser("ledger", help="append ledger rows from reconciliation.json")
     p.add_argument("--reconciliation", required=True); p.add_argument("--out", required=True)
+    p.add_argument("--run-dir", help="the run directory, to check its name against the "
+                                     "reconciliation's run_id")
+    p.add_argument("--run-id", help="override both")
     p.set_defaults(fn=cmd_ledger)
 
     a = ap.parse_args()

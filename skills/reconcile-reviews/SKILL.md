@@ -281,10 +281,16 @@ python3 <review-kit>/bin/review.py summarize --reconciliation $D/reconciliation.
     --out $SUMMARY --open-defects $STORE/open_defects.json \
     --run-dir $D
 python3 <review-kit>/bin/review.py ledger --reconciliation $D/reconciliation.json \
-    --out $STORE/ledger.jsonl
+    --out $STORE/ledger.jsonl --run-dir $D
 ```
 
 Run `carryover` **before** `summarize`, because the summary renders what it computes.
+
+**`run_id` must be the run directory's name.** Coverage, the open-defect history and the ledger
+all key on it, and they used to reach it by two different routes — the directory name for the
+first two, your `reconciliation.json` for the third. Write the run id you were given, verbatim;
+if it disagrees with the directory the run lives in, `carryover` and `ledger` now refuse rather
+than quietly splitting the history across two namespaces.
 
 ### What carryover tells you, and why one of its answers matters most
 
