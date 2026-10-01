@@ -151,7 +151,7 @@ fixes.
 
 ### The ledger
 
-Each run appends to `$STORE/ledger.jsonl` — `.review/ledger.jsonl` on an install that symlinks the store into the repo, and a path under `~/.review-kit/` on a `--minimal` one. Per reviewer: how many findings were reported,
+Each run appends to `$STORE/ledger.jsonl`, under `~/.review-kit/<repo>-<hash>/review/`. Per reviewer: how many findings were reported,
 confirmed, refuted and unverifiable, over what denominator.
 
 This is the only feedback signal that improves the reviewers over time. A confirmation rate

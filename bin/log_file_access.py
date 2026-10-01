@@ -29,6 +29,25 @@ def looks_like_path(s: str, root: str) -> bool:
         return False
 
 
+def store_for(root):
+    """The review store for this working directory, or None if the kit is not installed here.
+
+    The slug comes from the kit's own `review.py` rather than a copy, so the hook and every
+    other stage can never disagree about where a repository's store is. Importing it costs
+    about 2ms against the ~8ms this process already spends starting Python.
+    """
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "review_kit_review", Path(__file__).resolve().parent / "review.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        store = mod.store_path(Path(root))
+    except Exception:
+        return None
+    return store if store.is_dir() else None
+
+
 def paths_from(tool, inp):
     out = set()
     # `path` on a Grep or Glob is the directory searched, not a file whose contents came back.
@@ -67,9 +86,14 @@ def main():
         return
     inp = ev.get("tool_input") or {}
     root = os.environ.get("REVIEW_ACCESS_ROOT") or os.getcwd()
-    logdir = Path(root) / ".review"
+    logdir = store_for(root)
+    if logdir is None:
+        # No store for this directory, so this is not a repository anyone installed the kit
+        # for. Writing anyway is how the previous version littered a `.review/` into every
+        # directory a session ever touched — and worse, that bare directory then read as an
+        # in-repo install and put a whole run inside the repository being audited.
+        return
     try:
-        logdir.mkdir(parents=True, exist_ok=True)
         rec = {"t": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
                "tool": tool, "agent": ev.get("agent_id") or ev.get("session_id"),
                "paths": filtered(paths_from(tool, inp), root)}

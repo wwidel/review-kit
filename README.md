@@ -9,43 +9,67 @@ and no agent decides on its own that a review is due. Agents are unreliable at d
 "periodically" — the trigger misfires, or fires often enough that the output stops being read —
 so the decision to spend five agents on a review stays with whoever is paying for it.
 
-## Quick install
+## Install
 
-The least invasive option. Clone the kit somewhere, then point it at a repository:
+Clone the kit somewhere, then point it at a repository:
 
 ```bash
 git clone <review-kit> ~/tools/review-kit
-python3 ~/tools/review-kit/bin/install.py --repo ~/code/some-project --minimal
+python3 ~/tools/review-kit/bin/install.py --repo ~/code/some-project
 ```
 
-**It writes nothing inside the repository.** The skills go to `~/.claude/skills/`, the review
-store to `~/.review-kit/<repo>-<hash>/review/`. Open the project and type `/repo-audit`.
+Then **start a new session in that repository** and type `/repo-audit`.
 
-**What you get**
+**It writes nothing inside the repository.** Skills go to `~/.claude/skills/`, the access-log
+hook to `~/.claude/settings.json`, and every artefact a review produces to
+`~/.review-kit/<repo>-<hash>/`. The only file that ever lands in your working tree is the
+summary, written at the end of a run, which is the deliverable and meant to be committed.
 
-- `/repo-audit` and the single-purpose skills, in every project on this machine
-- every artefact a review produces — findings, summary, ledger, defect history — under the
-  store path, not in your working tree
-- reviewer independence by construction: no review output sits anywhere a reviewer's `grep -r`
-  over the repository could reach it
+### The one rule
 
-**What you do not get**
+**A review runs from a session started in the repository being reviewed.** This is the only
+supported mode, and the rest of the design follows from it. The access-log hook takes no
+configuration because its working directory *is* the repository under review; nothing
+per-repository is baked into any settings file, so installing for a second repository cannot
+disturb the first. `review.py preflight` checks the rule at the start of every run and refuses
+a review launched from anywhere else, because the failure is otherwise silent — reads recorded
+against another repository's store, and every honest reviewer reported as having claimed a file
+it never opened.
 
-- **`review.py audit`.** It cross-checks what a reviewer *claims* to have read against a log
-  the harness writes, and that needs a `PostToolUse` hook in the settings file of the directory
-  your session starts in. This mode writes no hook, so until you add one, a reviewer's account
-  of which files it opened is taken on trust.
-- **A pointer from the repo to its store.** Nothing inside the project says where its reviews
-  live; note the path, or install without `--minimal` to get a `.review` symlink.
-- **A committable summary.** `REVIEW-SUMMARY.md` is written into the store rather than the repo,
-  so there is nothing to commit alongside the code.
-- **`REVIEW-RULES.md`.** Add it later with `--with-rules` when you want to record which
-  practices this repository has adopted.
-- **Project-scoped skills.** They are global, so `/repo-audit` appears in every repository you
-  open, including ones you never intend to audit.
+### What it touches
 
-Everything on that list is available by installing without `--minimal` — see
-**[Install](#install)** for the full set and what each part costs you.
+| path | what |
+|---|---|
+| `~/.claude/skills/` | the seven skills, symlinked (or copied with `--copy`) |
+| `~/.claude/settings.json` | one `PostToolUse` hook line, naming no repository |
+| `~/.review-kit/<repo>-<hash>/` | that repository's store, config and shield directory |
+| `~/.review-kit/installed-skills.json` | which skill names this kit owns |
+| the repository | **nothing**, until a run writes the summary |
+
+Installing for another repository is the same command with a different `--repo`. It rewrites
+the same global skills and the same hook line — identical both times — and creates a second
+store. The first repository is untouched.
+
+Other flags: `--copy` copies the skills instead of symlinking them (the default symlink keeps
+one copy of the truth, so a `git pull` in the kit updates every repository at once);
+`--no-hook` skips the access hook, which makes `review.py audit` unavailable; `--with-rules`
+copies the house-rules template in as `REVIEW-RULES.md`, the one flag that writes into the
+repository. `--uninstall` removes the skills this kit installed and nothing else — your stores,
+summaries and the hook line stay.
+
+### Two things it cannot promise you
+
+- **That the hook is firing.** A hook that is not firing is invisible until `audit` reports no
+  access log. If that happens, open `/hooks` once or restart the session: the settings watcher
+  may not pick up a file it did not see at startup. Install says so, and so does `preflight`.
+- **That `/repo-audit` only appears where you want it.** The skills are global, so the command
+  shows up in every project on the machine, including ones you never intend to audit.
+
+### If the repository already has a `REVIEW-SUMMARY.md`
+
+It is left alone. The install claims the first free name — `REVIEW-SUMMARY-1.md`, and so on —
+records the choice, and every later run reuses it. Nothing in your working tree is ever
+overwritten by an install.
 
 ## The documents
 
@@ -69,60 +93,54 @@ settings file. It merges into an existing `settings.json` rather than replacing 
 re-run, and refuses loudly if that file is not valid JSON — a malformed settings file silently
 disables every setting in it.
 
-**If the session was started somewhere other than the repository you are reviewing**, say so:
-
-```bash
-python3 <review-kit>/bin/install.py --repo ../some-project --session-root .
-```
-
-This matters more than it looks. Claude Code reads project settings from the directory the
-*session* started in; a `.claude/settings.json` in a subdirectory is never read, so the hook
-would silently do nothing. `--session-root` puts the hook in the file that is actually read and
-sets `REVIEW_ACCESS_ROOT` so the log still lands in the repository being reviewed.
-
-Other flags: `--minimal` writes nothing into the repository at all (see
-[Quick install](#quick-install)); `--copy` copies the skills instead of symlinking them (the default symlink keeps
-one copy of the truth, so a `git pull` in the kit updates every repo at once); `--no-hook` installs the
-skills only, and `review.py audit` is then unavailable; `--with-rules` copies the house-rules
-template into the repo as `REVIEW-RULES.md` (see *Adopting the practices, or not* below).
-
 `PRACTICES.md`, `FINDINGS.md` and `bin/` stay where they are — the skills reference all three by
-path and read them at run time, so keep the kit's checkout intact.
+path and read them at run time, so keep the kit's checkout intact. The install records where the
+kit lives, so `review.py store --repo . --kit` answers that question later even if the skills
+were copied rather than symlinked.
 
 ### If the hook does not seem to fire
 
 A hook added to an existing settings file generally takes effect immediately, and adding one
-mid-session has worked in practice. It is not guaranteed for a settings file that did not exist
-when the session began: the settings watcher only watches directories that already had one. If
-`audit` reports no access log, open `/hooks` once to reload the configuration, or restart the
-session. Everything else in the kit works without the hook — only `audit` needs it, and it
-refuses to run rather than report a pass it cannot support.
+mid-session has been observed to work. It is not guaranteed for a settings file that did not
+exist when the session began: the settings watcher only watches directories that already had
+one. If `audit` reports no access log, open `/hooks` once to reload the configuration, or
+restart the session. Everything else in the kit works without the hook — only `audit` needs it,
+and it refuses to run rather than report a pass it cannot support.
 
-**Where the state lives.** `.review/` is a symlink to `~/.review-kit/<repo>-<hash>/review/`, unless you
-installed with `--minimal`, which writes no symlink and leaves the store reachable only by its
-path under `~/.review-kit/`. The directory name carries a hash of the repository's absolute
-path, not just its basename, so two checkouts both called `analysis` do not share one coverage
-record and one defect history. The indirection is deliberate: `grep -r` and `rg` skip symlinked directories, so a reviewer sweeping the repository
-cannot pick up an earlier run's conclusions, while a person opening a file under `.review/` by
-store committed and accept that a grep can then reach it.
+**Where the state lives.** Everything a review produces is at
+`~/.review-kit/<repo>-<hash>/review/` — findings, probes, manifests, the coverage record, the
+open-defect history, the ledger and the access log. The directory name carries a hash of the
+repository's absolute path, not just its basename, so two checkouts both called `analysis` do
+not share one coverage record and one defect history.
+
+It lives outside the repository for one reason: a reviewer sweeping the tree with `grep -r`
+must not be able to pick up an earlier run's conclusions. Nothing points at it from inside the
+working tree — use `review.py store --repo .` to print the path.
 
 `REVIEW-SUMMARY.md` stays a real, committed file at the repo root — it is the deliverable. A
 real file *is* found by `grep -r`, so the orchestrator runs `review.py shield` before the
 reviewer stage and `unshield` after; the file is held outside the repository in between, and an
 interrupted run is recovered on the next shield rather than orphaned.
 
-State the kit writes into the repository under review:
+The only state the kit writes into the repository under review:
 
 ```
 REVIEW-SUMMARY.md     the deliverable — confirmed defects, fixed vs for you. A real,
                       committable file at the repo root, shielded while reviewers run.
+                      The name is claimed at install; a repo that already had one keeps it
+                      and the kit takes REVIEW-SUMMARY-1.md instead.
+```
 
-.review/
+Everything else is external, at `~/.review-kit/<repo>-<hash>/`:
+
+```
+config.json           the repo, the kit's location, and the claimed summary filename
+shield/               where the summary waits while reviewers run
+review/
   coverage.json       per-(file, reviewer) record of what has been reviewed, and when
   open_defects.json   every confirmed defect across runs, and what became of it
-  ledger.jsonl        per-reviewer confirmed/refuted/deferred, one row per run
-  last_review.json    where the last run got to — a bookmark, not a timer
   ledger.jsonl        one row per reviewer per run: reported, confirmed, refuted, deferred
+  last_review.json    where the last run got to — a bookmark, not a timer
   access.jsonl        every file a tool touched, written by the hook, not by any agent
   runs/<run-id>/      manifest, machine, repo_profile, probes, per-reviewer findings,
                       clusters, recurrence, reconciliation.json, and pre/ snapshots of
@@ -281,12 +299,12 @@ half, not the judgement half.
 | `machine` | cores, usable memory, disk, GPU, and which frameworks are importable |
 | `characterize` | signals about the repo's posture — tests, linter, CI, commit recency. A hint for calibrating severity, never a finding |
 | `validate` | enforces the findings contract: missing fields, a heavy command that was run, `certain` resting on reasoning, an unread scope not declared |
-| `audit` | compares `files_read` against the harness-written access log — the one check an agent cannot defeat from inside its own context. `--agent` scopes it to one reviewer's reads; `--list-agents` prints the ids in the log so each can be matched to a reviewer |
+| `audit` | compares `files_read` against the harness-written access log — the one check an agent cannot defeat from inside its own context. `--agent` scopes it to one reviewer's reads; `--list-agents` prints the ids in the log so each can be matched to a reviewer; `--run-dir` dates the run so a read from an earlier one cannot vouch for this one |
 | `fingerprint` | stamps a stable id from the file path and a normalised source anchor, so a defect keeps its identity across runs even when lines move |
 | `cluster` | groups findings that share a fingerprint (corroboration) and lists near-misses as candidates for the reconciler to judge |
 | `match` | which defects also appeared in the previous run and are still open |
 | `estimate` | counts the files and lines a full review would read and prices it in tokens, before anything is spawned. `--budget N` exits non-zero when the estimate exceeds N |
-| `store` | prints this repo's review store, and with `--summary` where `REVIEW-SUMMARY.md` belongs — the repo root normally, the store under `--minimal`. Derive it; never hard-code either |
+| `store` | prints this repo's review store; `--summary` the summary's claimed filename at the repo root; `--kit` where the kit itself lives. All three come from the install record — derive them, never hard-code them |\n| `preflight` | checks the conditions a review depends on — that the session is inside the repository under review, that the kit is installed for it, whether the hook is wired — and refuses otherwise |
 | `shield` / `unshield` | move `REVIEW-SUMMARY.md` outside the repo for the reviewer stage and back afterwards; refuses a hold inside the repo, and recovers an interrupted shield |
 | `coverage` | per-(file, reviewer) record of what has been reviewed, at which sha256, and how stale each file is; names files never reviewed |
 | `carryover` | tracks confirmed defects across runs and classifies each as re-reported, not-re-checked, plausibly-fixed, or **missed** |
@@ -311,8 +329,10 @@ being checked. In `.claude/settings.json`:
 }
 ```
 
-Set `REVIEW_ACCESS_ROOT` to the repository under review if it is not the working directory.
-Without the hook, `audit` refuses to run rather than reporting a pass it cannot support.
+The hook takes no configuration: it logs to the store of whichever repository the session is
+in, and writes nothing at all for a directory that has no store. Without the hook, `audit`
+refuses to run rather than reporting a pass it cannot support — and it ignores records
+older than the run it is checking, so a read from an earlier run cannot vouch for this one.
 
 Be clear-eyed about what this does and does not prove. It shows that a tool call touching a
 file was issued — not that the content was attended to. It is a floor, not a guarantee, and it

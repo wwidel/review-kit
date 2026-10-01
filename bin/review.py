@@ -131,39 +131,79 @@ def shield_path(repo: Path) -> Path:
     return (Path.home() / ".review-kit" / repo_slug(repo) / "shield").resolve()
 
 
-# What a real review store contains. A directory holding none of these is not a store.
-STORE_MARKERS = ("runs", "coverage.json", "open_defects.json", "ledger.jsonl",
-                 "last_review.json")
+def config_path(repo: Path) -> Path:
+    """Per-repository install record, beside the store rather than inside the repository.
 
-
-def installed_in_repo(repo: Path) -> bool:
-    """Did an install put a review store inside this repository?
-
-    A symlink is one — that is the only thing install.py creates. A real directory counts
-    only if it actually holds store content, because the access-log hook creates a bare
-    `.review/` in whatever directory a session happens to be working in. Treating that as an
-    install put an entire run inside the repository being audited, where a reviewer's
-    `grep -r` reaches last run's conclusions — defeating the one property the external store
-    exists to buy. An empty `.review/`, or one holding only `access.jsonl`, is not an install.
+    Two facts have to survive between `install.py` and a run days later, and neither can be
+    recomputed. The first is where the kit itself lives: every skill says
+    `<review-kit>/bin/review.py` and nothing else records what that resolves to — with
+    `--copy` the skills do not even point back at it. The second is which filename this
+    repository's summary claimed, because the obvious one may already have been taken by a
+    file that is not ours.
     """
-    link = repo / ".review"
-    if link.is_symlink():
-        return True
-    if not link.is_dir():
-        return False
-    return any((link / m).exists() for m in STORE_MARKERS)
+    return (Path.home() / ".review-kit" / repo_slug(repo) / "config.json").resolve()
+
+
+DEFAULT_SUMMARY = "REVIEW-SUMMARY.md"
+
+
+def read_config(repo: Path) -> dict:
+    p = config_path(repo)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except ValueError:
+        return {}
+
+
+def write_config(repo: Path, **kw) -> dict:
+    p = config_path(repo)
+    cfg = read_config(repo)
+    cfg.update({k: v for k, v in kw.items() if v is not None})
+    cfg["repo"] = str(repo.resolve())
+    p.parent.mkdir(parents=True, exist_ok=True)
+    write_atomic(p, json.dumps(cfg, indent=2) + "\n")
+    return cfg
+
+
+def claim_summary_name(repo: Path) -> str:
+    """Pick a summary filename that is free, ONCE, and remember it.
+
+    Claimed at install and then reused for the life of the install. Searching for a free name
+    on every run would leave REVIEW-SUMMARY-1.md, -2.md, -3.md behind and `shield` would stop
+    knowing which file is this run's — so the search happens once and the answer is recorded.
+    A repository that already has a REVIEW-SUMMARY.md of its own keeps it untouched.
+    """
+    cfg = read_config(repo)
+    if cfg.get("summary"):
+        return cfg["summary"]
+    stem, ext = DEFAULT_SUMMARY.rsplit(".", 1)
+    name = DEFAULT_SUMMARY
+    n = 0
+    while (repo / name).exists():
+        n += 1
+        name = f"{stem}-{n}.{ext}"
+    return name
 
 
 def summary_path(repo: Path) -> Path:
-    """Where REVIEW-SUMMARY.md belongs for this install.
+    """Where this repository's summary belongs. Always the repo root: it is the deliverable.
 
-    A normal install puts it at the repo root, committable, and the orchestrator shields it
-    while reviewers run. A `--minimal` install promises to write nothing into the repository,
-    so it goes to the store instead — the skills used to hard-code the repo path and broke
-    that promise on every run.
+    The name comes from the install record, because the plain one may have been taken.
     """
-    return ((repo / "REVIEW-SUMMARY.md") if installed_in_repo(repo)
-            else store_path(repo) / "REVIEW-SUMMARY.md")
+    return repo / (read_config(repo).get("summary") or DEFAULT_SUMMARY)
+
+
+def shieldable(repo: Path):
+    """What `shield` moves aside. Derived, never hardcoded.
+
+    It was a literal ["REVIEW-SUMMARY.md"], which stops being the summary the moment a
+    repository already had a file of that name and the install claimed a suffixed one. Shield
+    would then protect the wrong file and every reviewer could still grep last run's
+    conclusions — losing the independence the whole fan-out exists to buy, silently.
+    """
+    return [read_config(repo).get("summary") or DEFAULT_SUMMARY]
 
 
 # ---------------------------------------------------------------- scope
@@ -389,6 +429,80 @@ def cmd_scope(a):
     if not review:
         print("EMPTY SCOPE — do not review nothing.", file=sys.stderr)
         sys.exit(3)
+
+
+# ---------------------------------------------------------------- preflight
+
+HOOK_FILES = ("~/.claude/settings.json",)
+
+
+def hook_wired(repo: Path):
+    """Which settings files mention the access-log hook. Informational, never fatal."""
+    found = []
+    for cand in [Path(f).expanduser() for f in HOOK_FILES] + [repo / ".claude/settings.json"]:
+        try:
+            if cand.exists() and "log_file_access.py" in cand.read_text():
+                found.append(cand)
+        except OSError:
+            pass
+    return found
+
+
+def cmd_preflight(a):
+    """Check the conditions a review depends on, before anything is spawned.
+
+    One of them cannot be checked any other way: the access-log hook writes its log beside
+    whichever directory the session is CURRENTLY in, not the one it started in. Auditing repo
+    A from a shell sitting in repo B silently logs A's reads into B's store, and `audit` then
+    reports every honest reviewer as having claimed a file it never opened. The kit's rule is
+    that a review runs from inside the repository it reviews; this is the only thing that
+    enforces it.
+    """
+    repo = Path(a.repo).resolve()
+    cwd = Path.cwd().resolve()
+    problems, notes = [], []
+
+    if cwd != repo:
+        problems.append(
+            f"the shell is in {cwd}\n    but the repository under review is {repo}.\n"
+            "    Run the review from inside the repository: the access-log hook follows the\n"
+            "    working directory, so reads would be recorded against the wrong store.")
+
+    cfg = read_config(repo)
+    if not cfg:
+        problems.append(f"no install record at {config_path(repo)}.\n"
+                        f"    Run: python3 <review-kit>/bin/install.py --repo {repo}")
+    else:
+        kit = Path(cfg.get("kit", "")) if cfg.get("kit") else None
+        here = Path(__file__).resolve().parent.parent
+        if not kit or not kit.exists():
+            problems.append(f"the recorded kit path {cfg.get('kit')!r} does not exist. "
+                            "Re-run install.py.")
+        elif kit.resolve() != here:
+            notes.append(f"this is {here}, but the install recorded {kit}. The skills a "
+                         "reviewer reads may not be the ones you just edited.")
+        notes.append(f"summary: {summary_path(repo)}")
+
+    store = store_path(repo)
+    if not store.is_dir():
+        problems.append(f"no review store at {store}. Run install.py --repo {repo}")
+
+    hooks = hook_wired(repo)
+    if hooks:
+        notes.append("access hook: " + ", ".join(str(h) for h in hooks)
+                     + " — UNVERIFIED until a run produces a log; `audit` will say so")
+    else:
+        notes.append("access hook: not wired, so `review.py audit` is unavailable and every "
+                     "reviewer's account of what it read is taken on trust")
+
+    for n in notes:
+        print(f"  {n}")
+    if problems:
+        print(f"\npreflight: {len(problems)} problem(s)", file=sys.stderr)
+        for x in problems:
+            print(f"  - {x}", file=sys.stderr)
+        sys.exit(2)
+    print(f"preflight OK — {repo}")
 
 
 # ---------------------------------------------------------------- estimate
@@ -1463,9 +1577,6 @@ def cmd_carryover(a):
 
 # ---------------------------------------------------------------- shield / unshield
 
-SHIELDABLE = ["REVIEW-SUMMARY.md"]
-
-
 def _hold_dir(repo: Path, hold: str | None) -> Path:
     """Where shielded files go. It MUST resolve outside the repository.
 
@@ -1483,17 +1594,22 @@ def _hold_dir(repo: Path, hold: str | None) -> Path:
 
 
 def cmd_store(a):
-    """Print the review store for a repo. One implementation, so a caller never re-derives it.
+    """Print the paths a run needs, so no caller ever re-derives one.
 
-    The orchestrator used to hard-code `.review/`, which the --minimal install deliberately
-    does not create — so a run following the Quick install wrote its findings inside the
-    repository it was auditing, where a reviewer's grep reaches them.
+    All three come from the install record rather than from convention: the store, the
+    summary's claimed filename, and where the kit itself lives. The orchestrator used to
+    hard-code `.review/`, and wrote a whole run inside the repository it was auditing.
     """
     repo = Path(a.repo).resolve()
     if a.summary:
         print(summary_path(repo))
-        return
-    print((repo / ".review") if installed_in_repo(repo) else store_path(repo))
+    elif a.kit:
+        kit = read_config(repo).get("kit")
+        if not kit:
+            die(f"no kit path recorded for {repo}. Run install.py --repo {repo} first.")
+        print(kit)
+    else:
+        print(store_path(repo))
 
 
 def cmd_shield(a):
@@ -1519,7 +1635,7 @@ def cmd_shield(a):
                   f"was NOT put back over it — it is at {alt}", file=sys.stderr)
     hold.mkdir(parents=True, exist_ok=True)
     moved = []
-    for name in SHIELDABLE:
+    for name in shieldable(repo):
         src = repo / name
         if src.exists() and not src.is_symlink():
             dst = hold / name
@@ -1634,10 +1750,45 @@ def cmd_audit(a):
     declared = set(doc.get("scope", {}).get("files_read") or [])
     touched = set()
     agents_seen = set()
+
+    # The log is appended to forever, across every run of this repository. Without a floor on
+    # the timestamp, a record written three weeks ago vouched for a file this run never
+    # opened — so the one check an agent cannot forge could still be satisfied by history,
+    # and on a second audit of the same repo that covers most of the scope.
+    since = a.since
+    if not since and a.run_dir:
+        man = _load_json(Path(a.run_dir) / "manifest.json")
+        since = man.get("generated")
+        if not since:
+            die(f"{a.run_dir}/manifest.json records no `generated` time, so there is nothing "
+                "to date the access records against. Pass --since explicitly.")
+    if not since:
+        die("audit needs a floor on the access log: pass --run-dir (the run's manifest.json "
+            "carries its start time) or --since <ISO timestamp>. Without one, a record from "
+            "any earlier run supports this run's claims.")
+    try:
+        floor = datetime.datetime.fromisoformat(since)
+    except ValueError:
+        die(f"--since {since!r} is not an ISO timestamp.")
+    if floor.tzinfo is None:
+        floor = floor.replace(tzinfo=datetime.timezone.utc)
+    stale = 0
     for line in logp.read_text().splitlines():
         try:
             rec = json.loads(line)
         except ValueError:
+            continue
+        # A record with no timestamp predates this check and cannot be placed in time.
+        # Excluding it is the safe direction: it can no longer vouch for anything.
+        try:
+            t = datetime.datetime.fromisoformat(rec["t"])
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=datetime.timezone.utc)
+        except (KeyError, TypeError, ValueError):
+            stale += 1
+            continue
+        if t < floor:
+            stale += 1
             continue
         if rec.get("agent"):
             agents_seen.add(rec["agent"])
@@ -1667,6 +1818,8 @@ def cmd_audit(a):
     checkable = set(declared) - set(outside)
     print(f"audit {name}: {len(checkable)} of {len(declared)} declared file(s) are checkable "
           f"against this log; {len(touched & checkable)} of those appear in it")
+    print(f"  records considered: those at or after {floor.isoformat()}"
+          + (f"; {stale} earlier or undated record(s) ignored" if stale else ""))
     if outside:
         print(f"  note: {len(outside)} declared path(s) lie outside {repo} and cannot be "
               "checked against this log: " + ", ".join(outside[:4]), file=sys.stderr)
@@ -1958,6 +2111,9 @@ def main():
                         "are never demoted however long (default 500)")
     p.set_defaults(fn=cmd_scope)
 
+    p = sub.add_parser("preflight", help="check the conditions a review depends on")
+    p.add_argument("--repo", required=True); p.set_defaults(fn=cmd_preflight)
+
     p = sub.add_parser("estimate", help="price a full review BEFORE spawning anything")
     p.add_argument("--manifest", required=True)
     p.add_argument("--reviewers", type=int, default=DEFAULT_REVIEWERS,
@@ -2017,9 +2173,10 @@ def main():
     p = sub.add_parser("store", help="print this repo's review store path")
     p.add_argument("--repo", required=True)
     p.add_argument("--summary", action="store_true",
-                   help="print where REVIEW-SUMMARY.md belongs instead: the repo root on a "
-                        "normal install, the store under --minimal, which writes nothing "
-                        "into the repository")
+                   help="print this repository's summary path instead — the name was claimed "
+                        "at install and may be suffixed if the plain one was taken")
+    p.add_argument("--kit", action="store_true",
+                   help="print where the review kit itself lives, as recorded at install")
     p.set_defaults(fn=cmd_store)
 
     p = sub.add_parser("shield", help="move in-repo conclusions aside for the reviewer stage")
@@ -2037,6 +2194,9 @@ def main():
     p.add_argument("--access-log", required=True)
     p.add_argument("--agent", help="the subagent id whose reads may support this file's "
                                    "claims; required when the log holds more than one")
+    p.add_argument("--run-dir", help="the run whose manifest.json dates this review; access "
+                                     "records older than its start time are ignored")
+    p.add_argument("--since", help="ISO timestamp floor, instead of --run-dir")
     p.add_argument("--list-agents", action="store_true",
                    help="print the agent ids in the log with what each touched, so each can "
                         "be matched to a reviewer. --findings is not needed with this")

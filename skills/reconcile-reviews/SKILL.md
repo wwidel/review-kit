@@ -34,18 +34,19 @@ in a finding is a hypothesis about a figure.
 
 ## Stage 0 — Resolve the store, then the budget
 
-`$STORE` below is this repository's review store. Resolve it first; it is not always `.review/`,
-because a `--minimal` install puts it under `~/.review-kit/<repo>-<hash>/review/` and writes nothing
-into the repo at all:
+`$STORE` below is this repository's review store. It is always outside the repository, at
+`~/.review-kit/<repo>-<hash>/review/` — nothing the kit produces is written inside the repo
+except the summary. Resolve it rather than assuming it:
 
 ```bash
 STORE=$(python3 <review-kit>/bin/review.py store --repo .)
 SUMMARY=$(python3 <review-kit>/bin/review.py store --repo . --summary)
 ```
 
-`$SUMMARY` is where the deliverable belongs **for this install**, and it is not always the repo
-root. A `--minimal` install promises to write nothing into the repository; writing the summary
-there anyway would break the only guarantee that mode makes. Never hard-code the filename.
+`$SUMMARY` is where the deliverable belongs **for this install**, and it is not always
+`REVIEW-SUMMARY.md`. The install claims a filename once, suffixing it if the repository already
+had a file by that name, and records the choice; writing to a literal name would overwrite
+somebody else's file. Never hard-code it.
 
 ### Know the budget before the first verdict
 

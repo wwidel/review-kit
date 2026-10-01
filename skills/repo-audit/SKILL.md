@@ -43,13 +43,22 @@ independent — which has happened twice. Shielding *after* `scope` is worse tha
 the manifest then lists a file the pipeline has removed, and every reviewer is charged a
 SCOPE GAP for failing to read it.
 
-**Derive the store; never hard-code `.review/`.** A `--minimal` install writes nothing into
-the repository, so a literal `.review/` does not exist there and `mkdir -p .review/...` would
-put this run's findings inside the repo being audited — where a reviewer's `grep -r` reaches them, and
-contrary to what that install promised.
+**Run `preflight` first and stop if it fails.** It checks the one condition everything else
+rests on: that this session is *in* the repository being reviewed. The access-log hook follows
+the working directory, so a review launched from somewhere else records its reads against
+another repository's store, and `audit` then reports every honest reviewer as having claimed a
+file it never opened. It also confirms the kit is installed for this repo and tells you
+whether the hook is wired.
+
+**Derive every path; hard-code none of them.** The store, the summary filename and the kit's
+own location all come from the install record — `store`, `store --summary`, `store --kit`. The
+summary is not always `REVIEW-SUMMARY.md`: if the repository already had a file by that name,
+the install claimed a suffixed one rather than overwriting it.
 
 ```bash
+python3 <review-kit>/bin/review.py preflight --repo .   # STOP if this fails
 STORE=$(python3 <review-kit>/bin/review.py store --repo .)
+SUMMARY=$(python3 <review-kit>/bin/review.py store --repo . --summary)
 RUN=$(date -u +%Y-%m-%dT%H-%M-%SZ); D=$STORE/runs/$RUN; mkdir -p $D
 python3 <review-kit>/bin/review.py shield --repo .
 python3 <review-kit>/bin/review.py scope --repo . --out $D --list [--since <ref>]
@@ -144,9 +153,8 @@ not something you can check. `shield` moves the file outside the repository for 
 and `unshield` puts it back. If an earlier run was interrupted mid-shield, `shield` restores it
 before shielding again, so the file is never orphaned.
 
-(The rest of the store is already outside the repo: `.review` is a symlink, and `grep -r` and
-`rg` skip symlinked directories. Only the summary needs moving — unless the store was installed
-everything.)
+(The rest of the store is already outside the repository entirely, under `~/.review-kit/`,
+so nothing else is reachable from inside the tree. Only the summary needs moving.)
 
 ### Spawn them ONE AT A TIME, never in parallel
 
@@ -280,7 +288,7 @@ done
 python3 <review-kit>/bin/review.py audit --repo . --access-log $STORE/access.jsonl --list-agents
 # Match each id to a reviewer by the paths it touched, then, per file:
 python3 <review-kit>/bin/review.py audit --findings $D/findings-code.json --repo . \
-    --access-log $STORE/access.jsonl --agent <that reviewer's id>
+    --access-log $STORE/access.jsonl --agent <that reviewer's id> --run-dir $D
 python3 <review-kit>/bin/review.py cluster --run-dir $D
 python3 <review-kit>/bin/review.py match --run-dir $D --prev-run <previous run dir>   # skip on a first review
 python3 <review-kit>/bin/review.py coverage --run-dir $D --out $STORE/coverage.json --run-id $RUN
@@ -299,6 +307,12 @@ that was never executed. `audit` compares `files_read` against the harness-writt
 reviewer cannot defeat from inside its own context. **Pass `--agent`**: all four reviewers write
 into one log concurrently, so without it every reviewer's reads vouch for every other's claims.
 `audit` refuses to run on a multi-agent log when it is omitted.
+
+**Pass `--run-dir` too.** The access log is appended to for the life of the repository, so
+without a floor on the timestamp a read from an earlier run vouches for a file this one never
+opened — and on a second audit of the same repository that covers most of the scope. `--run-dir`
+takes the floor from the run's own `manifest.json`, and `audit` refuses to run without either
+that or an explicit `--since`.
 
 The ids are the harness's, not names you choose, so `audit --list-agents` prints the ones in
 the log together with what each touched; match them to reviewers by those paths. **If the
