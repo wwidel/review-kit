@@ -63,8 +63,11 @@ def paths_from(tool, inp):
         # path mentioned anywhere in the command line counted, so a reviewer could "read" a
         # file by naming it in an `ls`, a `rm`, or a command that failed outright.
         cmd = inp["command"]
-        if re.search(r"\b(cat|head|tail|sed|awk|less|more|grep|rg|python3?|node|jq|wc|diff|"
-                     r"md5sum|sha256sum|nl|strings|xxd|od)\b", cmd):
+        # wc, md5sum and sha256sum were here and return no file CONTENT — only a count or a
+        # digest. A reviewer that read nothing could pass the scope-honesty check with a
+        # single `wc -l $(ls *.py)`, which defeats the one check it cannot otherwise defeat.
+        if re.search(r"\b(cat|head|tail|sed|awk|less|more|grep|rg|python3?|node|jq|diff|"
+                     r"nl|strings|xxd|od)\b", cmd):
             out |= set(PATHY.findall(cmd))
     # A Grep or Glob pattern is deliberately ignored: searching a tree is not reading any
     # particular file, and counting it as one would let a single grep "support" a claim to
@@ -98,14 +101,14 @@ def main():
                "tool": tool, "agent": ev.get("agent_id") or ev.get("session_id"),
                "paths": filtered(paths_from(tool, inp), root)}
         if rec["paths"]:
-            with (logdir / "access.jsonl").open("a") as f:
+            with (logdir / "access.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps(rec) + "\n")
     except Exception as e:
         # Still never break the session — but leave a trace. A silently failed hook and an
         # honest reviewer that read nothing produce the same empty log, and `audit` then
         # accuses the reviewer.
         try:
-            (logdir / "access.errors").open("a").write(
+            (logdir / "access.errors").open("a", encoding="utf-8").write(
                 f"{datetime.datetime.now(datetime.timezone.utc).isoformat()} {type(e).__name__}: {e}\n")
         except Exception:
             pass

@@ -22,13 +22,19 @@ FIX_CERTAINTIES = ["mechanical", "judgment"]
 SKIP_DIRS = {".git", "node_modules", "vendor", "dist", "build", "__pycache__",
              ".venv", "venv", ".mypy_cache", ".pytest_cache", ".review", ".ipynb_checkpoints",
              ".claude", ".idea", ".vscode"}
-SOURCE_EXT = {".py", ".pyx", ".sh", ".R", ".r", ".Rmd", ".jl", ".sql",
-              ".md", ".yml", ".yaml", ".toml", ".cfg", ".ini", ".json", ".txt",
-              ".ipynb", ".csv", ".tsv"}
+# Every suffix set is lower-cased at definition and compared against `suffix.lower()`.
+# `.Rmd` sat here in mixed case while `classify` lower-cased, so no R Markdown file was ever
+# classified at all — in a data repository that is the primary analysis artefact. `.jsonl`
+# and `.parquet` were declared tabular but missing here, so they never survived classify to
+# reach the tabular branch, which was dead for both.
+SOURCE_EXT = {e.lower() for e in {
+    ".py", ".pyx", ".sh", ".R", ".r", ".Rmd", ".jl", ".sql",
+    ".md", ".yml", ".yaml", ".toml", ".cfg", ".ini", ".json", ".txt",
+    ".ipynb", ".csv", ".tsv", ".jsonl", ".parquet"}}
 
 # Source code and prose: always review tier, whatever their length. Demoting a long script
 # to "describe, do not read" hides exactly the file most worth reading.
-CODE_EXT = {".py", ".pyx", ".sh", ".R", ".r", ".Rmd", ".jl", ".sql"}
+CODE_EXT = {e.lower() for e in {".py", ".pyx", ".sh", ".R", ".r", ".Rmd", ".jl", ".sql"}}
 
 # Markdown is exempt from the length threshold: review-docs is the document-integrity leg and
 # demoting a long README to "query with a script" blinds it to the longest document in the
@@ -39,6 +45,10 @@ PROSE_EXT = {".md"}
 
 # Tabular data: described, and interrogated with a script rather than read.
 TABULAR_EXT = {".csv", ".tsv", ".parquet", ".jsonl"}
+
+# Tabular but not text: counting "lines" in one means counting newline bytes in a binary
+# container, which puts a meaningless number in the manifest.
+BINARY_TABULAR_EXT = {".parquet"}
 
 # Files no reviewer can read as text and no short script can usefully query: decks, documents,
 # spreadsheets, images, archives and model artefacts. They are still listed, because a reviewer
@@ -64,8 +74,15 @@ def write_atomic(path, text):
     """
     path = Path(path)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text)
-    os.replace(tmp, path)
+    try:
+        # Explicit UTF-8: the summary carries em dashes and middots, and the locale encoding
+        # either raised under LC_ALL=C or silently wrote cp1252 into a file meant to be
+        # committed and re-read elsewhere.
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)   # a failed write used to leave a stale .tmp behind
+        raise
 
 
 def read_json(path, what):
@@ -78,7 +95,7 @@ def read_json(path, what):
     if not p.exists():
         die(f"no {what} at {p}. Has the stage that writes it run yet?")
     try:
-        return json.loads(p.read_text())
+        return json.loads(p.read_text(encoding="utf-8"))
     except ValueError as e:
         die(f"{p} is not valid JSON ({e}).")
 
@@ -152,7 +169,7 @@ def read_config(repo: Path) -> dict:
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text())
+        return json.loads(p.read_text(encoding="utf-8"))
     except ValueError:
         return {}
 
@@ -230,13 +247,24 @@ def is_readable(p: Path) -> bool:
     traceback. Such a path is recorded, never silently dropped.
     """
     try:
-        return p.exists() and p.stat().st_size >= 0
+        # Opening it is the only honest test. `stat().st_size >= 0` is true for anything whose
+        # metadata is reachable — a mode-000 file passed, and then sha256_of raised and ended
+        # the whole audit at stage 0 with a traceback, which is precisely what this prevents.
+        with p.open("rb"):
+            return True
     except OSError:
         return False
 
 
-def iter_source(repo: Path, rejected=None, unreadable=None):
+def iter_source(repo: Path, rejected=None, unreadable=None, skipped=None):
     for root, dirs, files in os.walk(repo):
+        pruned = [d for d in dirs if d in SKIP_DIRS]
+        if skipped is not None:
+            # `unclassified`, `unreadable` and `deleted` all exist so the manifest never
+            # reports a scope it did not achieve. Whole directories were the one exception:
+            # a vendored patch or a committed generated module under vendor/ or build/ left
+            # no trace anywhere.
+            skipped.extend(Path(root) / d for d in pruned)
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for fn in files:
             p = Path(root) / fn
@@ -248,9 +276,6 @@ def iter_source(repo: Path, rejected=None, unreadable=None):
                 yield p
             elif rejected is not None:
                 rejected.append(p)
-
-
-DATA_EXT = {".csv", ".tsv", ".json", ".jsonl", ".parquet"}
 
 
 def describe_reference(p: Path, rel: str):
@@ -272,11 +297,12 @@ def describe_reference(p: Path, rel: str):
                      "read it. Note its existence, and say so in not_reviewed if its content "
                      "bears on a finding — a deck or PDF is where uncited numbers hide.")
         return d
-    d["lines"] = count_lines(p)
+    if p.suffix.lower() not in BINARY_TABULAR_EXT:
+        d["lines"] = count_lines(p)
     if p.suffix.lower() in (".csv", ".tsv"):
         sep = "\t" if p.suffix.lower() == ".tsv" else ","
         try:
-            with p.open(errors="replace") as f:
+            with p.open(encoding="utf-8", errors="replace") as f:
                 head = f.readline().rstrip("\n")
                 first = f.readline().rstrip("\n")
             d["columns"] = [c.strip() for c in head.split(sep)]
@@ -306,7 +332,11 @@ def cmd_scope(a):
         # `base` not `base..HEAD`: the working tree is included deliberately. On a live repo
         # the uncommitted change is usually the thing most worth reviewing, and excluding it
         # would silently review a state nobody is currently in.
-        rc, o, _ = sh(f"git diff --name-only {base}", cwd=repo)
+        # --relative: `git diff` prints paths from the worktree ROOT, `ls-files --others`
+        # prints them from cwd. With --repo on a subdirectory the two disagreed, every
+        # modified file resolved to a non-existent path, and the review window reported it
+        # as deleted — while announcing that "a removal can be the defect".
+        rc, o, _ = sh(f"git diff --relative --name-only {base}", cwd=repo)
         names = [x for x in o.splitlines() if x.strip()]
         # `git diff` lists tracked modifications only. A file created and not yet added is
         # both the most likely thing to be under review and the most likely to be missed.
@@ -314,9 +344,9 @@ def cmd_scope(a):
         names += [x for x in untracked.splitlines() if x.strip()]
         paths = [repo / x for x in dict.fromkeys(names)]
 
-    rejected, unreadable, deleted = [], [], []
+    rejected, unreadable, deleted, skipped = [], [], [], []
     if paths is None:
-        paths = sorted(iter_source(repo, rejected, unreadable))
+        paths = sorted(iter_source(repo, rejected, unreadable, skipped))
     else:
         # --since used to filter silently, so a new file with an unknown suffix — a .dvc
         # stage, a .lock — vanished from the manifest with nothing recorded. Full mode
@@ -338,7 +368,12 @@ def cmd_scope(a):
     review, reference, oversized = [], [], []
     for p in sorted(paths):
         rel = str(p.relative_to(repo))
-        n = 0 if p.suffix.lower() in OPAQUE_EXT else count_lines(p)
+        if not is_readable(p):
+            # It passed the walk and became unreadable since, or arrived through --since.
+            unreadable.append(p)
+            continue
+        ext_ = p.suffix.lower()
+        n = 0 if ext_ in OPAQUE_EXT or ext_ in BINARY_TABULAR_EXT else count_lines(p)
         # Tabular data is reference-tier at any size, and an opaque file can never be read
         # at all; .json is neither, because a 20-line config is something a reviewer must
         # actually read. Length decides for everything else.
@@ -375,6 +410,7 @@ def cmd_scope(a):
         # docs still reference, a test that guarded the thing that just changed — so the
         # window names what left it rather than showing a scope with a silent hole.
         "deleted": [str(q.relative_to(repo)) for q in sorted(deleted)],
+        "skipped_dirs": sorted(str(q.relative_to(repo)) for q in skipped),
         "reference_files": len(reference),
         "reference_lines": sum(f.get("lines", 0) for f in reference),
         "opaque_files": sum(1 for f in reference if f.get("kind") == "opaque"),
@@ -382,6 +418,11 @@ def cmd_scope(a):
     write_atomic((out / "manifest.json"), json.dumps(manifest, indent=2))
     n_opaque = manifest["opaque_files"]
     n_tab = len(reference) - n_opaque
+    if skipped:
+        print(f"  note: {len(skipped)} director(ies) were pruned by name and nothing in them "
+              "was reviewed — listed under `skipped_dirs` in the manifest:", file=sys.stderr)
+        for q in sorted(skipped)[:8]:
+            print(f"    {q.relative_to(repo)}/", file=sys.stderr)
     if deleted:
         print(f"  note: {len(deleted)} file(s) were DELETED in this window and are listed "
               "under `deleted` in the manifest — a removal can be the defect:", file=sys.stderr)
@@ -433,15 +474,18 @@ def cmd_scope(a):
 
 # ---------------------------------------------------------------- preflight
 
-HOOK_FILES = ("~/.claude/settings.json",)
+# Every settings file a hook can legitimately live in. Checking only the first two reported
+# "not wired" for a hook that was wired, which reads as a missing capability.
+HOOK_FILES = ("~/.claude/settings.json", "~/.claude/settings.local.json")
 
 
 def hook_wired(repo: Path):
     """Which settings files mention the access-log hook. Informational, never fatal."""
     found = []
-    for cand in [Path(f).expanduser() for f in HOOK_FILES] + [repo / ".claude/settings.json"]:
+    for cand in ([Path(f).expanduser() for f in HOOK_FILES]
+                 + [repo / ".claude/settings.json", repo / ".claude/settings.local.json"]):
         try:
-            if cand.exists() and "log_file_access.py" in cand.read_text():
+            if cand.exists() and "log_file_access.py" in cand.read_text(encoding="utf-8"):
                 found.append(cand)
         except OSError:
             pass
@@ -598,7 +642,7 @@ def cmd_machine(a):
     cores = os.cpu_count() or 1
     usable_gb = total_gb = None
     try:
-        with open("/proc/meminfo") as f:
+        with open("/proc/meminfo", encoding="utf-8") as f:
             mi = {l.split(":")[0]: l.split()[1] for l in f if ":" in l}
         usable_gb = round(int(mi.get("MemAvailable", 0)) / 1048576, 1)
         total_gb = round(int(mi.get("MemTotal", 0)) / 1048576, 1)
@@ -727,12 +771,14 @@ def cmd_probe(a):
     man = read_json(a.manifest, "manifest")
     # The manifest already records which repo it describes. Trusting it rather than the
     # caller's cwd means probe cannot be pointed at the wrong tree by accident.
-    repo = Path(man.get("repo") or a.repo or ".").resolve()
+    # --repo first: its help calls it an override, and the manifest always winning meant it
+    # silently did nothing when a manifest was moved between machines.
+    repo = Path(a.repo or man.get("repo") or ".").resolve()
     files = [repo / f["path"] for f in man["files"]]
     texts = {}
     for p in files:
         try:
-            texts[p] = p.read_text(errors="replace").splitlines()
+            texts[p] = p.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             pass
 
@@ -867,12 +913,19 @@ def validate_findings(doc, manifest=None, repo=None):
                  "(a count cannot be checked against the manifest)")
         read = []
     if manifest:
+        if "files" not in manifest:
+            v.append("manifest has no `files` key — it is not a scope manifest, or `scope` "
+                     "did not finish writing it")
+            manifest = None
+    if manifest:
         refset = {f["path"] for f in manifest.get("reference", [])}
         inscope = {f["path"] for f in manifest["files"]}
         unread = inscope - set(read)
         bogus = set(read) - inscope
         if bogus:
-            # Informational, never a violation. A reviewer legitimately opens things outside
+            # Only the `other` bucket below is informational. Opaque and reference-tier files
+            # ARE violations: they cannot have been read as claimed. A reviewer legitimately
+            # opens things outside
             # the review window — committed data files, a config it needs to interpret, the
             # kit's own contract. Penalising that would teach it to under-report what it read,
             # which is the opposite of what scope.files_read exists for.
@@ -913,6 +966,10 @@ def validate_findings(doc, manifest=None, repo=None):
                 declared.add(str(entry["path"]).strip())
                 continue
             head = re.split(r"[\s,;:]|—|--", str(entry).strip(), maxsplit=1)[0].strip().rstrip(",")
+            # The summary renders these as `path` — reason, so a reviewer that copies the
+            # kit's own convention back into not_reviewed was told its declaration did not
+            # count, and the pressure that creates is to pad files_read instead.
+            head = head.strip("`'\"")
             if head:
                 declared.add(head)
         undeclared = [q for q in sorted(unread) if q not in declared]
@@ -1015,7 +1072,11 @@ def normalize_anchor(text: str, strip_comments: bool = True) -> str:
 # .R and .jl were missing here while present there, so editing a comment in an R script moved
 # the fingerprint and the defect read as fixed. `.sql` comments with `--`, and `.Rmd` is
 # Markdown around its chunks, where `#` is a heading — stripping it there deletes the line.
-HASH_COMMENT_EXT = (CODE_EXT - {".sql", ".Rmd"}) | {".yml", ".yaml", ".toml", ".cfg", ".ini"}
+# Lower-cased on both sides: CODE_EXT is now normalised at definition, so subtracting the
+# mixed-case literals would have removed nothing and quietly let `.rmd` into the set — where
+# stripping `#` deletes a Markdown heading rather than a comment.
+HASH_COMMENT_EXT = ((CODE_EXT - {".sql", ".rmd"})
+                    | {".yml", ".yaml", ".toml", ".cfg", ".ini"})
 CODE_SUFFIXES = {e.lower() for e in HASH_COMMENT_EXT}
 
 
@@ -1029,16 +1090,22 @@ def finding_fingerprint(f, repo: Path):
     merge two findings it was never shown together.
     """
     path = f.get("file") or ""
-    anchor, basis = "", "claim-slug"
+    anchor, anchor_line, basis = "", "", "claim-slug"
     line = f.get("line")
     p = repo / path if path else None
     if p and p.exists() and isinstance(line, int):
         try:
-            lines = p.read_text(errors="replace").splitlines()
+            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
             if 1 <= line <= len(lines):
                 window = lines[max(0, line - 1): line + 1]
                 strip = p.suffix.lower() in CODE_SUFFIXES
                 anchor = " ".join(normalize_anchor(x, strip) for x in window).strip()
+                # Two lines give the fingerprint its uniqueness; ONE line is what the defect
+                # actually sits on. Testing presence against the pair meant that editing the
+                # next, unrelated line made the anchor absent and carryover concluded
+                # "plausibly-fixed" — closing a live critical defect, permanently, because
+                # summarize renders only what is still open.
+                anchor_line = normalize_anchor(lines[line - 1], strip)
                 basis = "source-anchor"
         except OSError:
             pass
@@ -1050,7 +1117,7 @@ def finding_fingerprint(f, repo: Path):
         # that is actually in the file, and a slug never is.
         words = re.findall(r"[a-zA-Z_][a-zA-Z0-9_]{2,}", f.get("claim", ""))
         key = f"{path}|{' '.join(words[:8]).lower()}"
-    return hashlib.sha1(key.encode()).hexdigest()[:12], basis, anchor
+    return hashlib.sha1(key.encode()).hexdigest()[:12], basis, anchor, anchor_line
 
 
 def cmd_fingerprint(a):
@@ -1059,12 +1126,13 @@ def cmd_fingerprint(a):
     doc = read_json(p, "findings file")
     weak = 0
     for f in doc.get("findings", []):
-        fp, basis, anchor = finding_fingerprint(f, repo)
+        fp, basis, anchor, anchor_line = finding_fingerprint(f, repo)
         f["fingerprint"] = fp
         f["fingerprint_basis"] = basis
         # The anchor TEXT, not just its hash. A hash cannot be reversed, and without the text
         # a later run cannot ask the one question that matters: is this defect still here?
         f["fingerprint_anchor"] = anchor
+        f["fingerprint_anchor_line"] = anchor_line
         f["fingerprint_line"] = f.get("line")
         weak += basis != "source-anchor"
     write_atomic(p, json.dumps(doc, indent=2))
@@ -1160,7 +1228,7 @@ def cmd_match(a):
     prevfp = {}
     if prev and prev.exists():
         for p in sorted(prev.glob("findings-*.json")):
-            for f in json.loads(p.read_text()).get("findings", []):
+            for f in json.loads(p.read_text(encoding="utf-8")).get("findings", []):
                 prevfp[f.get("fingerprint")] = f
     recurring = sorted(set(curfp) & set(prevfp))
     new = sorted(set(curfp) - set(prevfp))
@@ -1190,7 +1258,7 @@ def repo_from(run_dir=None, manifest=None, override=None):
     for cand in (manifest, (Path(run_dir) / "manifest.json") if run_dir else None):
         if cand and Path(cand).exists():
             try:
-                r = json.loads(Path(cand).read_text()).get("repo")
+                r = json.loads(Path(cand).read_text(encoding="utf-8")).get("repo")
                 if r and Path(r).is_dir():
                     return Path(r).resolve()
             except ValueError:
@@ -1203,12 +1271,12 @@ def _load_json(p, default=None):
     if not p.exists():
         return default if default is not None else {}
     try:
-        return json.loads(p.read_text())
+        return json.loads(p.read_text(encoding="utf-8"))
     except ValueError as e:
         die(f"{p} is not valid JSON: {e}")
 
 
-def anchor_present(repo: Path, rel: str, anchor: str):
+def anchor_present(repo: Path, rel: str, anchor: str, anchor_line: str = ""):
     """Is this normalised source anchor still in the file? True, False, or None for "cannot tell".
 
     Position-independent on purpose: the defect has not been fixed merely because the lines
@@ -1218,26 +1286,33 @@ def anchor_present(repo: Path, rel: str, anchor: str):
     several places locates nothing — and answering anyway would either bury a real defect or
     accuse a reviewer of missing one it had no way to find.
     """
-    if not anchor:
+    if not anchor and not anchor_line:
         return False
     p = repo / rel
     if not p.exists():
         return False
     try:
-        lines = p.read_text(errors="replace").splitlines()
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return False
     strip = p.suffix.lower() in CODE_SUFFIXES
-    hits = 0
-    for i in range(len(lines)):
-        window = " ".join(normalize_anchor(x, strip) for x in lines[i:i + 2]).strip()
-        if window and window == anchor:
-            hits += 1
-            if hits > 1:
-                # Occurs more than once, so it identifies nothing. Declining to answer is
-                # the safe side: the caller treats "not present" as evidence of a fix.
-                return None
-    return hits == 1
+    norm = [normalize_anchor(x, strip) for x in lines]
+
+    if anchor_line:
+        hits = sum(1 for x in norm if x and x == anchor_line)
+        if hits > 1:
+            # Occurs more than once, so it identifies nothing. Declining to answer is the
+            # safe side: the caller treats "not present" as evidence of a fix.
+            return None
+        return hits == 1
+
+    # A record stamped before the single-line anchor existed. The two-line window cannot
+    # distinguish "the defect is gone" from "the line after it changed", so it never
+    # answers False — an unverifiable defect stays open rather than closing wrongly.
+    for i in range(len(norm)):
+        if " ".join(norm[i:i + 2]).strip() == anchor:
+            return True
+    return None
 
 
 def resolve_fingerprints(rec, run_dir: Path):
@@ -1255,14 +1330,18 @@ def resolve_fingerprints(rec, run_dir: Path):
     known = set()
     for fp_ in sorted(Path(run_dir).glob("findings-*.json")):
         try:
-            for f in json.loads(fp_.read_text()).get("findings", []):
+            for f in json.loads(fp_.read_text(encoding="utf-8")).get("findings", []):
                 if f.get("fingerprint"):
                     known.add(f["fingerprint"])
         except ValueError:
             pass
     if not known:
         if rec.get("items"):
-            die(f"no findings-*.json in {run_dir}, so no reconciliation fingerprint can be "
+            present = sorted(x.name for x in Path(run_dir).glob("findings-*.json"))
+            what = (f"the {len(present)} findings file(s) in {run_dir} carry no fingerprints "
+                    f"({', '.join(present)}) — has `fingerprint` run?"
+                    if present else f"no findings-*.json in {run_dir}")
+            die(f"{what}, so no reconciliation fingerprint can be "
                 "checked against anything. This validation exists because an agent once "
                 "abbreviated all 58 of them and nothing noticed; silently passing here would "
                 "reinstate that.")
@@ -1423,6 +1502,7 @@ def cmd_carryover(a):
         for f in _load_json(fp_).get("findings", []):
             if f.get("fingerprint"):
                 anchors[f["fingerprint"]] = {"anchor": f.get("fingerprint_anchor", ""),
+                                             "anchor_line": f.get("fingerprint_anchor_line", ""),
                                              "file": f.get("file")}
 
     this_run, collisions = {}, {}
@@ -1456,14 +1536,16 @@ def cmd_carryover(a):
             continue  # handled below
         file_ = d.get("file")
         anchor = d.get("anchor", "")
+        anchor_line = d.get("anchor_line", "")
         if d.get("status") == "plausibly-fixed":
             # Already resolved once. Only the offending text COMING BACK reopens it — a file
             # dropping out of the review window must never resurrect a fixed defect.
-            if anchor and file_ in reviewed and anchor_present(repo, file_, anchor) is True:
+            if ((anchor or anchor_line) and file_ in reviewed
+                    and anchor_present(repo, file_, anchor, anchor_line) is True):
                 d["status"], d["last_outcome"] = "open", "regressed"
                 states.setdefault("regressed", []).append(fp_)
             continue
-        if not anchor:
+        if not anchor and not anchor_line:
             # No source anchor (a repo-wide or prose-level defect): presence cannot be
             # checked, so it is never auto-closed. Silence is not evidence of a fix.
             d["status"] = "open"
@@ -1490,11 +1572,11 @@ def cmd_carryover(a):
             d["reported_not_carried_in_runs"] = sorted(
                 set(d.get("reported_not_carried_in_runs", []) + [run_id]))
             states.setdefault("reported-not-carried", []).append(fp_)
-        elif anchor_present(repo, file_, anchor) is None:
+        elif anchor_present(repo, file_, anchor, anchor_line) is None:
             d["status"] = "open"
             d["last_outcome"] = "anchor-ambiguous"
             states.setdefault("anchor-ambiguous", []).append(fp_)
-        elif anchor_present(repo, file_, anchor):
+        elif anchor_present(repo, file_, anchor, anchor_line):
             # The file was reviewed, the defect was not re-reported, and the anchored text is
             # byte-identical. That is a CANDIDATE reviewer false negative, not a proven one:
             # a fix made adjacent to the anchor — a seed added on the line above, a guard
@@ -1517,11 +1599,14 @@ def cmd_carryover(a):
         disp = item.get("disposition")
         d = known["defects"].setdefault(fp_, {
             "first_run": run_id, "file": item.get("where", "").split(":")[0],
-            "anchor": anchors.get(fp_, {}).get("anchor", "")})
+            "anchor": anchors.get(fp_, {}).get("anchor", ""),
+            "anchor_line": anchors.get(fp_, {}).get("anchor_line", "")})
         if anchors.get(fp_, {}).get("file"):
             d["file"] = anchors[fp_]["file"]
         if anchors.get(fp_, {}).get("anchor"):
             d["anchor"] = anchors[fp_]["anchor"]
+        if anchors.get(fp_, {}).get("anchor_line"):
+            d["anchor_line"] = anchors[fp_]["anchor_line"]
         d.update({"where": item.get("where"), "severity": item.get("severity"),
                   "class": item.get("class"), "title": item.get("title"),
                   "last_seen_run": run_id})
@@ -1634,10 +1719,21 @@ def cmd_shield(a):
             print(f"  note: {name} had been rewritten since it was shielded, so the held copy "
                   f"was NOT put back over it — it is at {alt}", file=sys.stderr)
     hold.mkdir(parents=True, exist_ok=True)
+    planned = [n for n in shieldable(repo)
+               if (repo / n).exists() and not (repo / n).is_symlink()]
+    # Written BEFORE anything moves, and atomically. The marker is the only record of what
+    # left the repository; it used to be written last, with a plain write_text, so a crash in
+    # that window stranded the deliverable outside the tree with nothing pointing at it and
+    # every later command reporting success while doing nothing. _unshield skips entries
+    # whose source is absent, so a marker that over-claims is harmless.
+    write_atomic(marker, json.dumps(
+        {"repo": str(repo), "moved": planned,
+         "at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")},
+        indent=2))
     moved = []
-    for name in shieldable(repo):
+    for name in planned:
         src = repo / name
-        if src.exists() and not src.is_symlink():
+        if True:
             dst = hold / name
             dst.parent.mkdir(parents=True, exist_ok=True)
             try:
@@ -1651,12 +1747,11 @@ def cmd_shield(a):
                         shutil.move(str(hold / done), str(repo / done))
                     except OSError:
                         pass
+                marker.unlink(missing_ok=True)
                 die(f"could not shield {name}: {e}. Nothing was left out of the repository.")
             moved.append(name)
-    marker.write_text(json.dumps(
-        {"repo": str(repo), "moved": moved,
-         "at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")},
-        indent=2))
+    if not moved:
+        marker.unlink(missing_ok=True)
     print(f"shield: {len(moved)} file(s) held outside the repo for the reviewer stage"
           + (f" — {', '.join(moved)}" if moved else " (nothing to shield)"))
     print(f"  held in: {hold}")
@@ -1671,7 +1766,7 @@ def _unshield(marker: Path):
     their work and reported only that a shield "has been restored". A collision is now kept
     beside the current file and named, so nothing is lost either way.
     """
-    spec = json.loads(marker.read_text())
+    spec = json.loads(marker.read_text(encoding="utf-8"))
     repo, hold = Path(spec["repo"]), marker.parent
     back, parked = [], []
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -1725,7 +1820,7 @@ def cmd_audit(a):
         # learn the ids, so the documented loop could not be run at all. The ids are in the
         # log; what they cannot be is guessed.
         seen = {}
-        for line in logp.read_text().splitlines():
+        for line in logp.read_text(encoding="utf-8").splitlines():
             try:
                 rec = json.loads(line)
             except ValueError:
@@ -1773,7 +1868,7 @@ def cmd_audit(a):
     if floor.tzinfo is None:
         floor = floor.replace(tzinfo=datetime.timezone.utc)
     stale = 0
-    for line in logp.read_text().splitlines():
+    for line in logp.read_text(encoding="utf-8").splitlines():
         try:
             rec = json.loads(line)
         except ValueError:
@@ -1934,7 +2029,7 @@ def cmd_summarize(a):
     # carried-forward defects from earlier runs
     carried = {}
     if a.open_defects and Path(a.open_defects).exists():
-        carried = json.loads(Path(a.open_defects).read_text()).get("defects", {})
+        carried = json.loads(Path(a.open_defects).read_text(encoding="utf-8")).get("defects", {})
     here = {x.get("fingerprint") for x in items}
     missed = [d for k, d in carried.items()
               if d.get("status") == "open" and d.get("last_outcome") == "missed" and k not in here]
@@ -2047,6 +2142,8 @@ def rate_txt(v):
 
 def cmd_ledger(a):
     r = read_json(a.reconciliation, "reconciliation")
+    if "items" not in r:
+        die(f"{a.reconciliation} has no `items` key, so there is nothing to tally.")
     items = r["items"]
     rows = []
     UNATTRIB = "(unattributed)"
@@ -2067,7 +2164,7 @@ def cmd_ledger(a):
     seen = set()
     outp = Path(a.out)
     if outp.exists():
-        for line in outp.read_text().splitlines():
+        for line in outp.read_text(encoding="utf-8").splitlines():
             try:
                 prev = json.loads(line)
             except ValueError:
@@ -2080,7 +2177,7 @@ def cmd_ledger(a):
     # One write, not one per row: a crash midway through appending used to leave a partial
     # line, and every later read of the ledger then skipped the truncated row in silence.
     if fresh:
-        with open(a.out, "a") as f:
+        with open(a.out, "a", encoding="utf-8") as f:
             f.write("".join(json.dumps(row) + "\n" for row in fresh))
     for row in rows:
         print(f"  {row['reviewer']:18} {row['reported']:3} reported → {row['confirmed']} confirmed, "
@@ -2092,6 +2189,16 @@ def cmd_ledger(a):
 # ---------------------------------------------------------------- main
 
 def main():
+    # The console output carries arrows, em dashes and middots. Under a C/POSIX locale stdout
+    # defaults to ascii and every one of them raises mid-print, after the work is done and
+    # the file is written — so the command fails while having succeeded. Writing is what
+    # matters; a replacement character in a terminal is not.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
     ap = argparse.ArgumentParser(prog="review.py", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -2160,7 +2267,6 @@ def main():
 
     p = sub.add_parser("coverage", help="merge a run into the persistent coverage record")
     p.add_argument("--run-dir", required=True)
-    p.add_argument("--repo", help="overrides the repo recorded in the run's manifest")
     p.add_argument("--out", required=True); p.add_argument("--run-id")
     p.add_argument("--protocol-version"); p.set_defaults(fn=cmd_coverage)
 

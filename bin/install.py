@@ -46,7 +46,7 @@ def load_ownership() -> dict:
     if not OWNERSHIP.exists():
         return {}
     try:
-        return json.loads(OWNERSHIP.read_text()).get("skills", {})
+        return json.loads(OWNERSHIP.read_text(encoding="utf-8")).get("skills", {})
     except ValueError:
         return {}
 
@@ -54,7 +54,7 @@ def load_ownership() -> dict:
 def save_ownership(skills: dict):
     OWNERSHIP.parent.mkdir(parents=True, exist_ok=True)
     tmp = OWNERSHIP.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps({"skills": skills}, indent=2) + "\n")
+    tmp.write_text(json.dumps({"skills": skills}, indent=2) + "\n", encoding="utf-8")
     tmp.replace(OWNERSHIP)
 
 
@@ -76,6 +76,11 @@ def ours(path: Path, name: str, owned: dict) -> bool:
             return path.resolve() == (KIT / "skills" / name).resolve()
         except OSError:
             return name in owned   # dangling: ours if the record claims it, so it can be repaired
+    # Not a symlink. If the record says we installed a symlink here, then whatever is here now
+    # is not what we put there — somebody replaced it, and rmtree-ing it destroyed a
+    # hand-written skill with no message and exit 0. The record already knew; it was ignored.
+    if owned.get(name, {}).get("mode") == "link":
+        return False
     return name in owned
 
 
@@ -174,7 +179,7 @@ def install_hook():
     cfg = {}
     if SETTINGS.exists():
         try:
-            cfg = json.loads(SETTINGS.read_text())
+            cfg = json.loads(SETTINGS.read_text(encoding="utf-8"))
         except ValueError as e:
             print(f"error: {SETTINGS} is not valid JSON ({e}).", file=sys.stderr)
             print("A malformed settings file silently disables EVERY setting in it. "
@@ -183,22 +188,21 @@ def install_hook():
 
     cmd = f"python3 {KIT / 'bin' / 'log_file_access.py'}"
     post = cfg.setdefault("hooks", {}).setdefault("PostToolUse", [])
+
+    # Deduplicate on the SCRIPT, not on an exact matcher string. MATCHER has already changed
+    # once in this kit's life, and matching on it meant an upgrade appended a second entry
+    # instead of updating the first — leaving a stale hook pointing at an old path, which
+    # then failed on every Read, Bash, Grep, Glob, Edit and Write.
     for entry in post:
-        if entry.get("matcher") == MATCHER:
-            for h in entry.get("hooks", []):
-                if "log_file_access.py" in str(h.get("command", "")):
-                    h["command"] = cmd
-                    break
-            else:
-                entry.setdefault("hooks", []).append({"type": "command", "command": cmd})
-            break
-    else:
-        post.append({"matcher": MATCHER, "hooks": [{"type": "command", "command": cmd}]})
+        entry["hooks"] = [h for h in entry.get("hooks", [])
+                          if "log_file_access.py" not in str(h.get("command", ""))]
+    post[:] = [e for e in post if e.get("hooks")]
+    post.append({"matcher": MATCHER, "hooks": [{"type": "command", "command": cmd}]})
 
     # Via a temp file and rename: these are the user's settings, and a crash between truncate
     # and write leaves them with the malformed file this function warns about above.
     tmp = SETTINGS.with_name(SETTINGS.name + ".tmp")
-    tmp.write_text(json.dumps(cfg, indent=2) + "\n")
+    tmp.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, SETTINGS)
     return cmd
 

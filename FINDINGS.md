@@ -174,14 +174,17 @@ since March" is what turns a finding into a priority. Omit if genuinely nothing 
 **`fix`** — one concrete action. Not "consider refactoring"; a named change to a named place.
 A finding is not finished until it has a handle someone could pick up.
 
-**`fingerprint`**, **`fingerprint_anchor`**, **`fingerprint_line`** — do not write these by
+**`fingerprint`**, **`fingerprint_anchor`**, **`fingerprint_anchor_line`**, **`fingerprint_line`** — do not write these by
 hand. `bin/review.py fingerprint` stamps them from the file path and a normalised snippet of the
 source the finding points at, so the same defect gets the same id across reruns even when line
 numbers move, and a defect that was actually fixed stops matching. The *anchor text* is stored
 alongside the hash, not merely the hash: a hash cannot be reversed, and without the text a later
 run cannot ask the one question that matters — is this defect still here, or did someone fix it?
-That is what lets a later run distinguish "fixed" from "nobody looked" from "looked and missed
-it."
+Two anchors are stored, and the difference matters: the two-line window gives the fingerprint its
+uniqueness, while the single offending line is what a later run tests for presence. Testing the
+pair meant that editing the *next*, unrelated line made the anchor absent and a live defect was
+recorded as fixed. That is what lets a later run distinguish "fixed" from "nobody looked" from
+"looked and missed it."
 
 **`fix_certainty`**:
 
