@@ -84,22 +84,15 @@ overwritten by an install.
 | [`FINDINGS.md`](FINDINGS.md) | the JSON contract every reviewer emits |
 | `REVIEW-RULES.template.md` | copied into your repo by `--with-rules`; yours to edit |
 
-## Install
-
-```bash
-python3 <review-kit>/bin/install.py --repo <the repository to review>
-```
-
-That does the two things a review needs and both are easy to get wrong by hand: it puts the
-skills where Claude Code looks for them, and it writes the access-log hook into the right
-settings file. It merges into an existing `settings.json` rather than replacing it, is safe to
-re-run, and refuses loudly if that file is not valid JSON — a malformed settings file silently
-disables every setting in it.
+## Keeping the kit's checkout
 
 `PRACTICES.md`, `FINDINGS.md` and `bin/` stay where they are — the skills reference all three by
-path and read them at run time, so keep the kit's checkout intact. The install records where the
-kit lives, so `review.py store --repo . --kit` answers that question later even if the skills
-were copied rather than symlinked.
+path and read them at run time, so the kit's checkout must stay intact. The install records
+where it lives, so `review.py store --repo . --kit` answers that question later.
+
+`install.py` merges into an existing `settings.json` rather than replacing it, is safe to
+re-run, and refuses loudly if that file is not valid JSON — a malformed settings file silently
+disables every setting in it.
 
 ### If the hook does not seem to fire
 
@@ -231,10 +224,47 @@ rather than a claim:
 - **Your repository wins.** `CLAUDE.md` takes precedence wherever it disagrees, and a project
   adds its own rules in the `P-` namespace.
 - **`install.py --with-rules`** drops `REVIEW-RULES.md` into your repo: what you have adopted,
-  what you have *deliberately declined* and why, and your own `P-` rules. It is copied, never
-  referenced — the kit does not read its own rules back out of your repository. Reviewers read
-  it if present, and a rule recorded there as declined is dropped by the reconciler rather than
-  raised again.
+  what you have *deliberately declined* and why, and your own `P-` rules.
+
+### Where rules come from, and which wins
+
+Three sources, in this precedence order. Every reviewer and the reconciler is told to read them
+in exactly this sequence:
+
+| | file | lives in | who owns it |
+|---|---|---|---|
+| 1 | `CLAUDE.md` | your repository | you — the kit never writes or modifies it |
+| 2 | `REVIEW-RULES.md` | your repository | you, after `--with-rules` copies the template in |
+| 3 | `PRACTICES.md` | the kit | the kit — one copy, shared by every repository it reviews |
+
+`CLAUDE.md` is the last word wherever anything disagrees; it holds operational specifics —
+machine names, data locations, submission limits. `REVIEW-RULES.md` holds *standards*: which of
+the kit's rules this repository has adopted. `PRACTICES.md` is the default underneath both, and
+the stable ID vocabulary all three cite.
+
+Details worth knowing about `REVIEW-RULES.md`:
+
+- **It is optional and the kit works without it.** No `--with-rules`, no file, no problem —
+  findings then carry `rule_id: null`.
+- **It is copied, never referenced.** The kit does not read its own template back out of your
+  repository, and nothing in `bin/` reads `REVIEW-RULES.md` at all — only the agents do. There
+  is no validation of it and no schema.
+- **`--with-rules` never overwrites.** A repository that already has a `REVIEW-RULES.md` keeps
+  it untouched, and the install says so.
+- **It is yours to commit.** That is why it goes in the repository rather than into the external
+  store: adoption is a team decision, it belongs in version control beside the code it governs,
+  and it should travel to anyone who clones the repo. A copy under `~/` on one machine would be
+  none of those things.
+- **A rule recorded there as declined is not a finding.** Reviewers are told not to raise it,
+  and the reconciler drops one that slips through rather than re-litigating it.
+- **It is reviewed like any other document.** It sits in the review tier, so `review-docs` reads
+  it as prose as well as rules — a rules file that has gone stale is a real defect, and this is
+  how it gets caught. (`REVIEW-SUMMARY.md` is the one file `scope` leaves out, because it is the
+  kit's own output rather than yours.)
+- **The template ships blank.** Its adoption table has an empty `adopted?` column and the
+  instruction is to delete the rows that are not true of your repository. Until you edit it, a
+  reviewer cannot tell "we adopted nothing" from "nobody has filled this in" — so fill it in, or
+  delete it, rather than leaving it as shipped.
 
 Roughly forty of the sixty-nine rules describe **defects** — leakage, an unseeded split, a number
 quoted from memory, deserialising an artefact you did not produce. Breaking one means something
