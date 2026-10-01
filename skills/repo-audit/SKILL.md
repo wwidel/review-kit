@@ -288,7 +288,11 @@ another silently read 57% of its declared scope, and neither was caught until re
 
 ```bash
 for f in $D/findings-*.json; do
-  python3 <review-kit>/bin/review.py validate --findings $f --manifest $D/manifest.json
+  # || continue: without it the exit status is discarded and a contract-violating file is
+  # fingerprinted anyway, flows into cluster, and reaches the reconciler — while the last
+  # line on screen reads "stamped".
+  python3 <review-kit>/bin/review.py validate --findings $f --manifest $D/manifest.json \
+      || { echo "VALIDATION FAILED: $f — re-run that reviewer once, quoting this output"; continue; }
   python3 <review-kit>/bin/review.py fingerprint --findings $f --manifest $D/manifest.json
 done
 

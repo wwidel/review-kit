@@ -98,6 +98,17 @@ number very often lives in a deck.
 - Use `probes.json` for the mechanical checks; they are already run. A probe hit is a place to
   look, never a finding.
 
+## Do not read the previous review's summary
+
+A file named `REVIEW-SUMMARY.md` — or a name beginning with it, such as `REVIEW-SUMMARY-1.md`
+— may sit at the repository root. It holds a previous review's conclusions and it is left in
+place deliberately. **Do not read it, grep it, or reach it through `git show` or `git log -p`.**
+
+Independence is the single property this process buys, and it has already been lost twice to a
+reviewer that swept the repository and picked up prior findings. Both disclosed it honestly,
+which is worth something and is not a substitute. If you have read it, say so in
+`not_reviewed`; a disclosed leak is recoverable and a silent one is not.
+
 ## Which rules apply here
 
 Read, in this order of precedence:
@@ -120,6 +131,22 @@ Write the JSON file to the path you were given, per `<review-kit>/FINDINGS.md`, 
 `"reviewer": "fresh-eyes"`. Fill in the top-level `machine` block. `scope.files_read` is a list
 of the review-tier paths you opened; reference-tier files you queried go in
 `scope.files_queried`.
+
+**Declare the withheld documents, or validation will fail.** There is one manifest and it
+lists the whole review tier, documents included — so the validator counts every document you
+were forbidden to read as an undeclared gap and rejects your file. Put each one in
+`not_reviewed`, one entry per file, leading with its path:
+
+```json
+"not_reviewed": [
+  "README.md — withheld: blinded reviewer, documentation deliberately not read",
+  "docs/METHOD.md — withheld: blinded reviewer, documentation deliberately not read"
+]
+```
+
+Naming them costs you nothing: you already know documentation exists and was kept from you.
+Listing a path is not reading a file, and this is the difference between handing over a valid
+review and being re-run from scratch.
 
 Validate your own file before handing it over:
 

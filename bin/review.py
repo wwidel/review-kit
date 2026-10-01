@@ -351,6 +351,17 @@ def cmd_scope(a):
         # records those under `unclassified`; the mode most runs actually use must too.
         kept = []
         for p in paths:
+            # Full mode prunes SKIP_DIRS in iter_source; this path never did. A tracked,
+            # changed file under vendor/, build/ or .venv/ therefore entered the review tier
+            # and was read in full by every reviewer — and a target repo carrying its own
+            # .review/ had a previous run's findings read by the legs that must not see them.
+            rel_parts = set(p.relative_to(repo).parts[:-1])
+            if rel_parts & SKIP_DIRS:
+                hit = sorted(rel_parts & SKIP_DIRS)[0]
+                d_ = repo / hit
+                if d_ not in skipped:
+                    skipped.append(d_)
+                continue
             if not is_readable(p):
                 # A path in the diff that is simply gone was DELETED in this window — an
                 # ordinary event, and not the same thing as a file that exists and cannot be
@@ -969,10 +980,27 @@ def validate_findings(doc, manifest=None, repo=None):
             if isinstance(entry, dict) and entry.get("path"):
                 declared.add(str(entry["path"]).strip())
                 continue
-            head = re.split(r"[\s,;:]|—|--", str(entry).strip(), maxsplit=1)[0].strip().rstrip(",")
-            # The summary renders these as `path` — reason, so a reviewer that copies the
-            # kit's own convention back into not_reviewed was told its declaration did not
-            # count, and the pressure that creates is to pad files_read instead.
+            # Match a real in-scope path first; only parse one out of the text if none
+            # matches. Splitting on whitespace cannot declare `outputs - Copy/note.md` at
+            # all, so a reviewer with such a file had an unclearable SCOPE GAP and no way to
+            # diagnose it — the error told it to lead with the path, which it had done.
+            raw = str(entry).strip().strip("`'\"")
+            matched = None
+            for cand in sorted(unread, key=len, reverse=True):
+                # The delimiter set includes a backtick, because the kit's own summary
+                # renders these as `path` — reason, and a closing backtick immediately after
+                # the path would otherwise stop a spaced path from ever matching.
+                if raw == cand or (raw.startswith(cand)
+                                   and raw[len(cand):len(cand) + 1] in
+                                   (" ", ",", ";", ":", "`", "'", '"', "")):
+                    matched = cand
+                    break
+            if matched:
+                declared.add(matched)
+                continue
+            # Still strict: prose that merely mentions a filename declares nothing, which is
+            # what this check exists for.
+            head = re.split(r"[\s,;:]|—|--", raw, maxsplit=1)[0].strip().rstrip(",")
             head = head.strip("`'\"")
             if head:
                 declared.add(head)

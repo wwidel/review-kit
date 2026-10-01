@@ -215,6 +215,17 @@ from a file or a command's output in this session — never recalled from earlie
 context. If you find yourself typing a figure without looking, look. Your `evidence` field
 should make it possible for the reconciler to catch you if you did not.
 
+## Do not read the previous review's summary
+
+A file named `REVIEW-SUMMARY.md` — or a name beginning with it, such as `REVIEW-SUMMARY-1.md`
+— may sit at the repository root. It holds a previous review's conclusions and it is left in
+place deliberately. **Do not read it, grep it, or reach it through `git show` or `git log -p`.**
+
+Independence is the single property this process buys, and it has already been lost twice to a
+reviewer that swept the repository and picked up prior findings. Both disclosed it honestly,
+which is worth something and is not a substitute. If you have read it, say so in
+`not_reviewed`; a disclosed leak is recoverable and a silent one is not.
+
 ## Which rules apply here
 
 Read, in this order of precedence:
