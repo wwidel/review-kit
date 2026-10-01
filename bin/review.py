@@ -144,17 +144,14 @@ def store_path(repo: Path) -> Path:
     return (Path.home() / ".review-kit" / repo_slug(repo) / "review").resolve()
 
 
-def shield_path(repo: Path) -> Path:
-    return (Path.home() / ".review-kit" / repo_slug(repo) / "shield").resolve()
-
-
 def config_path(repo: Path) -> Path:
     """Per-repository install record, beside the store rather than inside the repository.
 
     Two facts have to survive between `install.py` and a run days later, and neither can be
     recomputed. The first is where the kit itself lives: every skill says
     `<review-kit>/bin/review.py` and nothing else records what that resolves to — with
-    `--copy` the skills do not even point back at it. The second is which filename this
+    skills are symlinks into it, but nothing should have to resolve a symlink to find out.
+    The second is which filename this
     repository's summary claimed, because the obvious one may already have been taken by a
     file that is not ours.
     """
@@ -188,8 +185,8 @@ def claim_summary_name(repo: Path) -> str:
     """Pick a summary filename that is free, ONCE, and remember it.
 
     Claimed at install and then reused for the life of the install. Searching for a free name
-    on every run would leave REVIEW-SUMMARY-1.md, -2.md, -3.md behind and `shield` would stop
-    knowing which file is this run's — so the search happens once and the answer is recorded.
+    on every run would leave REVIEW-SUMMARY-1.md, -2.md, -3.md behind, so the search happens
+    once and the answer is recorded.
     A repository that already has a REVIEW-SUMMARY.md of its own keeps it untouched.
     """
     cfg = read_config(repo)
@@ -212,15 +209,16 @@ def summary_path(repo: Path) -> Path:
     return repo / (read_config(repo).get("summary") or DEFAULT_SUMMARY)
 
 
-def shieldable(repo: Path):
-    """What `shield` moves aside. Derived, never hardcoded.
+def summary_name(repo: Path) -> str:
+    """This repository's summary filename, as claimed at install.
 
-    It was a literal ["REVIEW-SUMMARY.md"], which stops being the summary the moment a
-    repository already had a file of that name and the install claimed a suffixed one. Shield
-    would then protect the wrong file and every reviewer could still grep last run's
-    conclusions — losing the independence the whole fan-out exists to buy, silently.
+    The summary stays in the working tree during a review and reviewers are instructed not to
+    read it. That instruction is the whole protection. Moving the file out and back only ever
+    hid the working-tree copy — `git show HEAD:<name>` served the previous run's conclusions
+    regardless — so the machinery bought partial cover at the price of a marker file, a
+    crash-recovery path, and a way to strand the deliverable outside the repository.
     """
-    return [read_config(repo).get("summary") or DEFAULT_SUMMARY]
+    return read_config(repo).get("summary") or DEFAULT_SUMMARY
 
 
 # ---------------------------------------------------------------- scope
@@ -365,8 +363,15 @@ def cmd_scope(a):
         paths = kept
 
     rc, head, _ = sh("git rev-parse --short HEAD", cwd=repo)
+    # The summary is this kit's own output, not the repository's prose, and reviewers are told
+    # not to read it. Leaving it in the manifest would charge every one of them a SCOPE GAP
+    # for obeying that instruction, and the only truthful not_reviewed reason they could give
+    # names the file — which tells them what it is.
+    summary = summary_name(repo)
     review, reference, oversized = [], [], []
     for p in sorted(paths):
+        if p.name == summary and p.parent == repo:
+            continue
         rel = str(p.relative_to(repo))
         if not is_readable(p):
             # It passed the walk and became unreadable since, or arrived through --since.
@@ -1542,7 +1547,13 @@ def cmd_carryover(a):
     for item in rec.get("items", []):
         fp_ = item.get("fingerprint")
         if not fp_:
-            continue
+            # Dropping it silently lost a confirmed critical from the carried history while
+            # exiting 0, and `summarize` refuses the very same file. Two stages reading one
+            # artefact must agree on what is acceptable in it.
+            die(f"reconciliation item {item.get('where', 'no where')} "
+                f"({item.get('title', 'no title')!r}) has no fingerprint, so it cannot be "
+                "tracked across runs. Every item needs one, copied verbatim from a findings "
+                "file.")
         if fp_ in this_run:
             prev = this_run[fp_]
             if prev.get("disposition") != item.get("disposition"):
@@ -1693,24 +1704,6 @@ def cmd_carryover(a):
             print(f"    [{d.get('severity')}] {d.get('where')} — {d.get('title')}")
 
 
-# ---------------------------------------------------------------- shield / unshield
-
-def _hold_dir(repo: Path, hold: str | None) -> Path:
-    """Where shielded files go. It MUST resolve outside the repository.
-
-    The first version of this held them under the run directory, which lives inside the repo:
-    `grep -r` found them exactly as before and the shield did nothing. Somewhere outside the
-    tree is the whole requirement, so it is checked rather than assumed.
-    """
-    h = Path(hold).expanduser().resolve() if hold else shield_path(repo)
-    try:
-        h.relative_to(repo)
-    except ValueError:
-        return h  # outside the repo, which is what we need
-    die(f"--hold {h} resolves inside {repo}. Shielded files must sit outside the repository "
-        "or a reviewer's `grep -r` finds them exactly as before.")
-
-
 def cmd_store(a):
     """Print the paths a run needs, so no caller ever re-derives one.
 
@@ -1728,108 +1721,6 @@ def cmd_store(a):
         print(kit)
     else:
         print(store_path(repo))
-
-
-def cmd_shield(a):
-    """Move conclusion-bearing artefacts out of the repository for the reviewer stage.
-
-    `grep -r` and `rg` skip symlinked directories, which is why the review store lives outside
-    the repo — but a REAL file at the repo root is found by both, and the summary is
-    deliberately a real committed file. Two reviewers have already read a previous run's
-    conclusions this way. Independence is the one property the fan-out exists to buy, so the
-    summary steps aside while reviewers run and comes back afterwards.
-    """
-    repo = Path(a.repo).resolve()
-    hold = _hold_dir(repo, a.hold)
-    marker = hold / "SHIELD.json"
-    if marker.exists():
-        # An interrupted run left files out of the repo. One marker per repository, so this is
-        # always recoverable no matter which run dir was in play when it stopped.
-        back, parked = _unshield(marker)
-        print(f"  note: an unrestored shield was found and has been restored first "
-              f"({len(back)} file(s))", file=sys.stderr)
-        for name, alt in parked:
-            print(f"  note: {name} had been rewritten since it was shielded, so the held copy "
-                  f"was NOT put back over it — it is at {alt}", file=sys.stderr)
-    hold.mkdir(parents=True, exist_ok=True)
-    planned = [n for n in shieldable(repo)
-               if (repo / n).exists() and not (repo / n).is_symlink()]
-    # Written BEFORE anything moves, and atomically. The marker is the only record of what
-    # left the repository; it used to be written last, with a plain write_text, so a crash in
-    # that window stranded the deliverable outside the tree with nothing pointing at it and
-    # every later command reporting success while doing nothing. _unshield skips entries
-    # whose source is absent, so a marker that over-claims is harmless.
-    write_atomic(marker, json.dumps(
-        {"repo": str(repo), "moved": planned,
-         "at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")},
-        indent=2))
-    moved = []
-    for name in planned:
-        src = repo / name
-        if True:
-            dst = hold / name
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                # shutil.move, not Path.replace: the hold is under $HOME and the repository
-                # may be on another filesystem, where os.replace raises EXDEV. That is the
-                # ordinary case, not an edge one.
-                shutil.move(str(src), str(dst))
-            except OSError as e:
-                for done in moved:  # put back what already moved; never a half-shielded repo
-                    try:
-                        shutil.move(str(hold / done), str(repo / done))
-                    except OSError:
-                        pass
-                marker.unlink(missing_ok=True)
-                die(f"could not shield {name}: {e}. Nothing was left out of the repository.")
-            moved.append(name)
-    if not moved:
-        marker.unlink(missing_ok=True)
-    print(f"shield: {len(moved)} file(s) held outside the repo for the reviewer stage"
-          + (f" — {', '.join(moved)}" if moved else " (nothing to shield)"))
-    print(f"  held in: {hold}")
-    print(f"  restore: review.py unshield --repo {repo}")
-
-
-def _unshield(marker: Path):
-    """Put shielded files back. Never over a file that appeared while they were away.
-
-    `shutil.move` onto an existing path overwrites it silently. After an interrupted run the
-    person may well have written a new summary; restoring the held copy over it destroyed
-    their work and reported only that a shield "has been restored". A collision is now kept
-    beside the current file and named, so nothing is lost either way.
-    """
-    spec = json.loads(marker.read_text(encoding="utf-8"))
-    repo, hold = Path(spec["repo"]), marker.parent
-    back, parked = [], []
-    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    for name in spec.get("moved", []):
-        src, dst = hold / name, repo / name
-        if not src.exists():
-            continue
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if dst.exists():
-            alt = dst.with_name(f"{dst.name}.shielded-{stamp}")
-            shutil.move(str(src), str(alt))
-            parked.append((name, alt))
-            continue
-        shutil.move(str(src), str(dst))
-        back.append(name)
-    marker.unlink()
-    return back, parked
-
-
-def cmd_unshield(a):
-    hold = _hold_dir(Path(a.repo).resolve(), a.hold)
-    marker = hold / "SHIELD.json"
-    if not marker.exists():
-        print("unshield: nothing is shielded for this repository")
-        return
-    back, parked = _unshield(marker)
-    print(f"unshield: restored {len(back)} file(s)" + (f" — {', '.join(back)}" if back else ""))
-    for name, alt in parked:
-        print(f"  {name} was rewritten while shielded; the held copy was kept separately at "
-              f"{alt} rather than overwriting it", file=sys.stderr)
 
 
 # ---------------------------------------------------------------- audit (scope honesty)
@@ -2318,16 +2209,6 @@ def main():
     p.add_argument("--kit", action="store_true",
                    help="print where the review kit itself lives, as recorded at install")
     p.set_defaults(fn=cmd_store)
-
-    p = sub.add_parser("shield", help="move in-repo conclusions aside for the reviewer stage")
-    p.add_argument("--repo", required=True)
-    p.add_argument("--hold", help="where to hold them; must be outside the repo "
-                                  "(default ~/.review-kit/<repo>-<hash>/shield)")
-    p.set_defaults(fn=cmd_shield)
-
-    p = sub.add_parser("unshield", help="restore what shield moved")
-    p.add_argument("--repo", required=True); p.add_argument("--hold")
-    p.set_defaults(fn=cmd_unshield)
 
     p = sub.add_parser("audit", help="check files_read against the harness access log")
     p.add_argument("--findings"); p.add_argument("--repo", required=True)

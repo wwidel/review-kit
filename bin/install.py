@@ -65,23 +65,21 @@ def ours(path: Path, name: str, owned: dict) -> bool:
     skill of their own, and `~/.claude/skills/` is shared by every project on the machine, so
     a collision is a question of time rather than of luck.
 
-    A symlink is ours only if it actually points into this kit. The previous version unlinked
-    whatever it found and silently repointed a user's own skill at ours — exit 0, nothing
-    said. A real directory can never be told apart by inspection, which is what the ownership
-    record is for. With no record everything reads as somebody else's and the install refuses,
-    which is the safe direction.
+    Everything this kit installs is a symlink into the kit, which makes the question
+    decidable by resolving it: ours if it points at `<kit>/skills/<name>`, somebody else's
+    otherwise. An earlier version could copy instead, and a copy cannot be told from a
+    hand-written skill by inspection at all — that version also unlinked whatever symlink it
+    found and silently repointed a user's own skill at ours, exit 0, nothing said.
+
+    A real directory is therefore never ours. A dangling symlink is ours if the record claims
+    it, so a kit that moved can be repaired rather than refused.
     """
-    if path.is_symlink():
-        try:
-            return path.resolve() == (KIT / "skills" / name).resolve()
-        except OSError:
-            return name in owned   # dangling: ours if the record claims it, so it can be repaired
-    # Not a symlink. If the record says we installed a symlink here, then whatever is here now
-    # is not what we put there — somebody replaced it, and rmtree-ing it destroyed a
-    # hand-written skill with no message and exit 0. The record already knew; it was ignored.
-    if owned.get(name, {}).get("mode") == "link":
+    if not path.is_symlink():
         return False
-    return name in owned
+    try:
+        return path.resolve() == (KIT / "skills" / name).resolve()
+    except OSError:
+        return name in owned
 
 
 def plan_skills():
@@ -103,7 +101,7 @@ def plan_skills():
     return todo, clashes, owned
 
 
-def install_skills(link: bool):
+def install_skills():
     todo, clashes, owned = plan_skills()
     if clashes:
         print(f"error: {len(clashes)} skill name(s) in {SKILLS_HOME} are not this kit's:",
@@ -121,17 +119,12 @@ def install_skills(link: bool):
     for skill in todo:
         out = SKILLS_HOME / skill.name
         if out.is_symlink():
+            # Ours, from an earlier install: replaced, so an updated kit actually reaches the
+            # skills a reviewer reads. Never anything but a symlink — plan_skills refuses the
+            # rest before a single write happens.
             out.unlink()
-        elif out.exists():
-            # Ours, from an earlier install: replaced rather than merged, so an updated kit
-            # actually reaches the skills a reviewer reads.
-            shutil.rmtree(out)
-        if link:
-            out.symlink_to(skill)
-        else:
-            shutil.copytree(skill, out)
-        owned[skill.name] = {"source": str(skill), "mode": "link" if link else "copy",
-                             "installed": now}
+        out.symlink_to(skill)
+        owned[skill.name] = {"source": str(skill), "installed": now}
         done.append(skill.name)
     save_ownership(owned)
     return SKILLS_HOME, done
@@ -211,9 +204,6 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo", default=".", help="repository to review (default: cwd)")
-    ap.add_argument("--copy", action="store_true",
-                    help="copy the skills instead of symlinking them. A symlink keeps one "
-                         "copy of the truth, so a git pull in the kit updates every repo")
     ap.add_argument("--no-hook", action="store_true",
                     help="skip the access-log hook; `review.py audit` is then unavailable")
     ap.add_argument("--with-rules", action="store_true",
@@ -243,7 +233,7 @@ def main():
 
     # Skills first: it is the step that can refuse, and refusing after the store and config
     # were written would leave a half-installed repository behind.
-    dest, skills = install_skills(link=not a.copy)
+    dest, skills = install_skills()
 
     store = RV.store_path(repo)
     store.mkdir(parents=True, exist_ok=True)
@@ -252,7 +242,7 @@ def main():
 
     print(f"repo:   {repo}")
     print(f"store:  {store}")
-    print(f"skills: {len(skills)} {'symlinked' if not a.copy else 'copied'} into {dest}")
+    print(f"skills: {len(skills)} symlinked into {dest}")
     print(f"config: {RV.config_path(repo)}")
 
     if a.with_rules:
@@ -281,6 +271,8 @@ def main():
           + (" (--with-rules added REVIEW-RULES.md.)" if a.with_rules else ""))
     print(f"The summary will be written to {repo / summary} at the end of a run — a real, "
           "committable file.")
+    print("It stays in the repository during a review; reviewers are instructed not to read "
+          "it.")
     if summary != RV.DEFAULT_SUMMARY:
         print(f"  Note: {RV.DEFAULT_SUMMARY} already exists and is not ours, so this install "
               f"claimed {summary} instead.")

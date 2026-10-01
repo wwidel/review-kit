@@ -42,7 +42,7 @@ it never opened.
 |---|---|
 | `~/.claude/skills/` | the seven skills, symlinked (or copied with `--copy`) |
 | `~/.claude/settings.json` | one `PostToolUse` hook line, naming no repository |
-| `~/.review-kit/<repo>-<hash>/` | that repository's store, config and shield directory |
+| `~/.review-kit/<repo>-<hash>/` | that repository's store and config |
 | `~/.review-kit/installed-skills.json` | which skill names this kit owns |
 | the repository | **nothing**, until a run writes the summary |
 
@@ -117,16 +117,19 @@ It lives outside the repository for one reason: a reviewer sweeping the tree wit
 must not be able to pick up an earlier run's conclusions. Nothing points at it from inside the
 working tree — use `review.py store --repo .` to print the path.
 
-`REVIEW-SUMMARY.md` stays a real, committed file at the repo root — it is the deliverable. A
-real file *is* found by `grep -r`, so the orchestrator runs `review.py shield` before the
-reviewer stage and `unshield` after; the file is held outside the repository in between, and an
-interrupted run is recovered on the next shield rather than orphaned.
+`REVIEW-SUMMARY.md` stays a real, committed file at the repo root — it is the deliverable, and
+it stays there during a review. A real file *is* found by `grep -r`, so every reviewer is told
+by name not to read it. That instruction is the protection: moving the file aside, which an
+earlier version did, only hid the working-tree copy, because `git show HEAD:REVIEW-SUMMARY.md`
+and `git log -p` serve it regardless — and it cost a marker file, a crash-recovery path and a
+way to strand the deliverable outside the repository. The reconciler, which comes after the
+reviewers, may read it.
 
 The only state the kit writes into the repository under review:
 
 ```
 REVIEW-SUMMARY.md     the deliverable — confirmed defects, fixed vs for you. A real,
-                      committable file at the repo root, shielded while reviewers run.
+                      committable file at the repo root. Reviewers are told not to read it.
                       The name is claimed at install; a repo that already had one keeps it
                       and the kit takes REVIEW-SUMMARY-1.md instead.
 ```
@@ -135,7 +138,6 @@ Everything else is external, at `~/.review-kit/<repo>-<hash>/`:
 
 ```
 config.json           the repo, the kit's location, and the claimed summary filename
-shield/               where the summary waits while reviewers run
 review/
   coverage.json       per-(file, reviewer) record of what has been reviewed, and when
   open_defects.json   every confirmed defect across runs, and what became of it
@@ -282,7 +284,7 @@ review-kit/
 Every command that needs to know which repository it is working on reads that from the
 manifest or run directory it was given, so none of them depends on the shell's current
 directory. `scope` and `characterize` require `--repo` because at that point nothing has
-recorded it yet, and `shield`, `unshield` and `audit` require it because no manifest is
+recorded it yet, and `audit` requires it because no manifest is
 in play for them to read it from. This matters when the kit and the repository under review
 are different checkouts: you can drive a review of any repo from anywhere, and pointing a
 command at the wrong tree takes a deliberate `--repo` override.
@@ -305,7 +307,6 @@ half, not the judgement half.
 | `match` | which defects also appeared in the previous run and are still open |
 | `estimate` | counts the files and lines a full review would read and prices it in tokens, before anything is spawned. `--budget N` exits non-zero when the estimate exceeds N |
 | `store` | prints this repo's review store; `--summary` the summary's claimed filename at the repo root; `--kit` where the kit itself lives. All three come from the install record — derive them, never hard-code them |\n| `preflight` | checks the conditions a review depends on — that the session is inside the repository under review, that the kit is installed for it, whether the hook is wired — and refuses otherwise |
-| `shield` / `unshield` | move `REVIEW-SUMMARY.md` outside the repo for the reviewer stage and back afterwards; refuses a hold inside the repo, and recovers an interrupted shield |
 | `coverage` | per-(file, reviewer) record of what has been reviewed, at which sha256, and how stale each file is; names files never reviewed |
 | `carryover` | tracks confirmed defects across runs and classifies each as re-reported, not-re-checked, plausibly-fixed, or **missed** |
 | `summarize` | renders `REVIEW-SUMMARY.md` from `reconciliation.json`, so no count in it can disagree with the items beneath it |

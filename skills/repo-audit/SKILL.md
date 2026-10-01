@@ -37,11 +37,13 @@ fourth opinion nobody asked for.
 
 Run the tooling. Do not compute any of this by hand.
 
-**Shield first, before anything is scoped.** `REVIEW-SUMMARY.md` is a real committed file, so
-`grep -r` and `rg` find it, and a reviewer that reads last run's summary is no longer
-independent — which has happened twice. Shielding *after* `scope` is worse than not shielding:
-the manifest then lists a file the pipeline has removed, and every reviewer is charged a
-SCOPE GAP for failing to read it.
+**The summary stays where it is, and reviewers are told not to read it.** `REVIEW-SUMMARY.md`
+is a real committed file at the repo root, so `grep -r` finds it and a reviewer that reads last
+run's conclusions is no longer independent — which has happened twice. Earlier versions moved it
+out of the repository for the reviewer stage; that only ever hid the working-tree copy, since
+`git show HEAD:REVIEW-SUMMARY.md` and `git log -p` serve it regardless, and it cost a marker
+file, a crash-recovery path and a way to strand the deliverable outside the repo. **So the
+instruction is the protection, and it has to be in every reviewer's prompt — not assumed.**
 
 **Run `preflight` first and stop if it fails.** It checks the one condition everything else
 rests on: that this session is *in* the repository being reviewed. The access-log hook follows
@@ -60,7 +62,6 @@ python3 <review-kit>/bin/review.py preflight --repo .   # STOP if this fails
 STORE=$(python3 <review-kit>/bin/review.py store --repo .)
 SUMMARY=$(python3 <review-kit>/bin/review.py store --repo . --summary)
 RUN=$(date -u +%Y-%m-%dT%H-%M-%SZ); D=$STORE/runs/$RUN; mkdir -p $D
-python3 <review-kit>/bin/review.py shield --repo .
 python3 <review-kit>/bin/review.py scope --repo . --out $D --list [--since <ref>]
 python3 <review-kit>/bin/review.py machine --out $D/machine.json
 python3 <review-kit>/bin/review.py characterize --repo . --out $D/repo_profile.json
@@ -82,7 +83,7 @@ only point at which that is cheap to avoid.
 
 Say what it would cost, say what the smaller options are — a `--since` window, one fewer
 reviewer leg, a single-purpose skill on the files they actually care about — and let them
-decide. If they decline, stop; there is nothing to clean up but the `unshield`.
+decide. If they decline, stop; nothing has been written and there is nothing to clean up.
 
 `scope` writes `manifest.json` in **three tiers**. The *review tier* is read in full: source,
 Markdown, and anything else under the threshold. The *reference tier* is tabular data at any
@@ -149,12 +150,20 @@ state, not a re-run of the project. (`M-2`, `M-4`)
 that reads last run's summary is no longer independent, which is the single property this whole
 design buys. It has happened twice: a reviewer and a reconciler each swept the repository and
 picked up prior conclusions. Both disclosed it honestly, but "they said they re-derived it" is
-not something you can check. `shield` moves the file outside the repository for the duration
-and `unshield` puts it back. If an earlier run was interrupted mid-shield, `shield` restores it
-before shielding again, so the file is never orphaned.
+not something you can check.
 
-(The rest of the store is already outside the repository entirely, under `~/.review-kit/`,
-so nothing else is reachable from inside the tree. Only the summary needs moving.)
+`scope` leaves it out of the manifest, so no reviewer is charged a SCOPE GAP for obeying the
+instruction and none of them sees it in a file list. The file is still on disk, though, and a
+`grep -r`, an `ls`, or a `git show` reaches it.
+
+**So tell every reviewer, in its own prompt, not to read it — by name.** Say that a file of
+that name holds a previous review's conclusions, that it is deliberately left in place, and
+that reading it, grepping it, or reaching it through `git show` or `git log -p` destroys the
+independence its own leg exists to provide. An instruction a reviewer can see is worth more
+than one it cannot: a reviewer that notices the file and was told nothing will read it.
+
+(The rest of the store is outside the repository entirely, under `~/.review-kit/`, so nothing
+else is reachable from inside the tree.)
 
 ### Spawn them ONE AT A TIME, never in parallel
 
@@ -324,12 +333,8 @@ A reviewer whose file fails gets **re-run once**, with the validator's output qu
 not paper over a failure — a reviewer that quietly skipped its scope produces the most dangerous
 artefact this process can make, a clean report over unread code.
 
-**Restore the summary before reconciling** — the reconciler is entitled to the previous run's
-conclusions and needs them to judge `carryover`:
-
-```bash
-python3 <review-kit>/bin/review.py unshield --repo .
-```
+**The reconciler may read the summary.** It is entitled to the previous run's conclusions and
+needs them to judge `carryover`. The prohibition applies to the four reviewers only.
 
 ## Stage 2 — Reconcile, in a fresh context
 

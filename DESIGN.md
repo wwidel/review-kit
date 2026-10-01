@@ -68,7 +68,7 @@ disagreements that carry the signal never appear.
 This is fragile in practice and has to be defended by construction. Twice a reviewer swept the
 repository with `grep -r` and picked up a previous run's `REVIEW-SUMMARY.md`. Both disclosed it; that
 is lucky, not a control. So the review store lives outside the repository behind a symlink, and
-the summary is shielded for the duration of the reviewer stage.
+every reviewer is told by name not to read the summary.
 
 ### 2. One reviewer is blinded
 
