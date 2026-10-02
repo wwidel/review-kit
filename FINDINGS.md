@@ -190,7 +190,8 @@ recorded as fixed. That is what lets a later run distinguish "fixed" from "nobod
 
 - `mechanical` — the fix is unambiguous and local, and any competent reader would write the
   same one. A typo, a wrong variable, a missing `seed=`, an unclosed file, a broken link. Only
-  these are eligible to be applied automatically.
+  these are the ones a report can call out as cheap to clear. Nothing in this kit applies
+  them for you — the reconciler edits no files.
 - `judgment` — the right fix depends on intent, or there is more than one defensible option, or
   it touches an interface. Reported to the human, never applied.
 

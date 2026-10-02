@@ -4,7 +4,7 @@ description: Whole-repository review for Python data-analysis and machine-learni
   Runs four independent reviewers one at a time, each in a fresh context — blinded
   fresh-eyes, code
   correctness, analytical validity, document integrity — then a fresh reconciler that
-  re-verifies every claim, applies only what it confirmed, and reports the rest. Invoke ONLY
+  re-verifies every claim and reports what it confirmed. Edits nothing. Invoke ONLY
   when the user explicitly asks for a review; never start it on your own judgement, on a
   schedule, or from a git hook.
 model: opus
@@ -352,7 +352,7 @@ Spawn **one** agent, not in parallel with anything:
 > candidates you must judge by hand), `recurrence.json` (defects also reported last run),
 > `manifest.json` (the three-tier scope), `machine.json`, `probes.json` and `repo_profile.json`.
 > `$STORE/open_defects.json` carries defects earlier runs confirmed — run `carryover` against
-> it before `summarize`, as your skill's Stage 6 sets out.
+> it before `summarize`, as your skill's Stage 5 sets out.
 > Base commit for this review: `<base>`. Run id: `<RUN>`. Suite at `<review-kit>`.
 > This repository has `<a test suite / no test suite and no linter config>`; your post-fix
 > check is limited accordingly.
@@ -361,9 +361,10 @@ It must be **fresh** — not one of the reviewers continued, and not you. A revi
 reconcile will confirm its own findings, which is the one thing the stage exists to prevent.
 
 It reads the JSON only, never the reviewers' prose. It re-verifies every claim from its
-evidence, clusters duplicates, applies only what it confirmed and that is mechanical, runs
-whatever check the repository actually provides afterwards, reports the rest, and writes the
-summary, the carryover record and the ledger.
+evidence, clusters duplicates, reports every defect it confirmed, and writes the summary, the
+carryover record and the ledger. **It changes nothing in the repository** — that is what makes
+an interrupted run resumable, and it keeps a verified diagnosis from carrying an unverified
+prescription into your code.
 
 ## Stage 3 — Hand over
 

@@ -1685,6 +1685,10 @@ def cmd_carryover(a):
         # item including the fixed and the refuted ones, so the record said "found again,
         # still open" about a defect it had just marked fixed.
         if disp == "applied":
+            # Retired. A reconciliation written before the kit stopped editing files may still
+            # say this; its fix really was applied then, so the record stands. Nothing emits it
+            # now — a defect the human fixes is closed by the NEXT run's anchor check, which
+            # observes that the offending source is gone rather than asserting it.
             d["status"], d["resolved_run"] = "fixed", run_id
             d["last_outcome"] = "fixed-this-run"
         elif disp == "dropped":
@@ -1887,7 +1891,7 @@ def cmd_summarize(a):
     if missing:
         die(f"reconciliation is missing required top-level key(s): {', '.join(missing)}. "
             "The shape is {run_id, date, run_dir, head?, machine?, not_reviewed?, "
-            "confidence_note?, revert_cmd?, line_shift_note?, items[]} — see Stage 6 of the "
+            "confidence_note?, items[]} — see Stage 5 of the "
             "reconcile-reviews skill.")
     items = r["items"]
     for i, x in enumerate(items):
@@ -1899,8 +1903,11 @@ def cmd_summarize(a):
                 die(f"reconciliation item {i} ({x.get('where', 'no where')}) is missing "
                     f"'{k}'. Every item needs: disposition, fingerprint, where, severity, "
                     "title, defect, fix.")
-    fixed = [x for x in items if x["disposition"] == "applied"]
-    openi = [x for x in items if x["disposition"] == "open"]
+    # `applied` is retired: the reconciler no longer edits the repository, so nothing is
+    # fixed by the time this renders. Records written before that change still carry it, and
+    # they are counted as open rather than dropped on the floor.
+    legacy_applied = [x for x in items if x["disposition"] == "applied"]
+    openi = [x for x in items if x["disposition"] in ("open", "applied")]
     deferred = [x for x in items if x["disposition"] == "deferred"]
     dropped = [x for x in items if x["disposition"] == "dropped"]
     unver = [x for x in items if x["disposition"] == "unverifiable"]
@@ -1911,8 +1918,7 @@ def cmd_summarize(a):
     w = L.append
     m = r.get("machine", {})
     w(f"# Review summary — {r['date']} @ {r.get('head', '?')}\n")
-    w(f"**{len(fixed) + len(openi)} confirmed defects: {len(fixed)} fixed in "
-      f"the working tree, {len(openi)} for you "
+    w(f"**{len(openi)} confirmed defects for you "
       f"({sum(1 for x in openi if x.get('severity') == 'critical')} critical).** "
       f"{len(deferred)} more are deferred for compute — checkable, but not on this machine. "
       + (f"{len(dropped)} reported finding{'s were' if len(dropped) != 1 else ' was'} "
@@ -1923,20 +1929,15 @@ def cmd_summarize(a):
     # The run directory is an absolute path under someone's home. This file is committed, so
     # it names the run instead and lets the reader resolve it: `review.py store --repo .`
     w(f"Full detail: run `{r.get('run_id', '?')}` under this repository's review store "
-      f"(`review.py store --repo .`) · revert the fixes: `{r.get('revert_cmd', '—')}`\n")
+      f"(`review.py store --repo .`)")
+    w("\nNothing in your working tree was changed. Every defect below is yours to fix or "
+      "decline; the ones marked\n*mechanical* are unambiguous and local, and are the cheapest "
+      "place to start.\n")
+    if legacy_applied:
+        w(f"> {len(legacy_applied)} item(s) in this reconciliation use the retired `applied` "
+          "disposition, from a run made when the\n> reconciler still edited files. They are "
+          "listed below as open; check your working tree before acting on them.\n")
     w("---\n")
-
-    w(f"## Fixed ({len(fixed)})\n")
-    if fixed:
-        w("| # | where | defect | fix implemented |")
-        w("|---|---|---|---|")
-        for i, x in enumerate(fixed, 1):
-            w(f"| {i} | `{cell(x['where'])}` | {cell(x['defect'])} | {cell(x['fix'])} |")
-    else:
-        w("Nothing was applied automatically.")
-    if r.get("line_shift_note"):
-        w(f"\n> {r['line_shift_note']}")
-    w("")
 
     w(f"## For you ({len(openi)})\n")
     for sev in SEVERITIES:
@@ -2061,12 +2062,14 @@ def cmd_summarize(a):
     w(r.get("confidence_note", ""))
 
     write_atomic(Path(a.out), "\n".join(L) + "\n")
-    # Matches the file's own headline, which counts fixed + open. Deferred items are
-    # confirmed as *findings* but not as defects-with-a-verdict, and reporting one total here
-    # and a different one at the top of the file made the two look like a disagreement.
-    print(f"summary: {len(fixed) + len(openi)} confirmed ({len(fixed)} fixed, "
-          f"{len(openi)} open), {len(deferred)} deferred for compute, "
-          f"{len(dropped)} dropped → {a.out}")
+    # Matches the file's own headline. Deferred items are confirmed as *findings* but not as
+    # defects-with-a-verdict, and reporting one total here and a different one at the top of
+    # the file made the two look like a disagreement.
+    print(f"summary: {len(openi)} confirmed for the human, {len(deferred)} deferred for "
+          f"compute, {len(dropped)} dropped → {a.out}")
+    if legacy_applied:
+        print(f"  note: {len(legacy_applied)} item(s) carry the retired `applied` disposition "
+              "and are counted as open.", file=sys.stderr)
     print("counts derived from reconciliation.json; headers cannot disagree with contents")
 
 
@@ -2102,6 +2105,8 @@ def cmd_ledger(a):
     reviewers = sorted({rv for x in items for rv in (x.get("corroborated_by") or [UNATTRIB])})
     for rev in reviewers:
         mine = [x for x in items if rev in (x.get("corroborated_by") or [UNATTRIB])]
+        # "applied" is retired but still counted, so a row from an older run stays
+        # comparable with a new one: both mean "the reconciler confirmed this".
         conf = sum(1 for x in mine if x["disposition"] in ("applied", "open"))
         ref = sum(1 for x in mine if x["disposition"] == "dropped")
         dfr = sum(1 for x in mine if x["disposition"] == "deferred")

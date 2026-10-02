@@ -1,9 +1,9 @@
 ---
 name: reconcile-reviews
 description: Reconciles the JSON findings of several independent reviewers — re-verifying each
-  claim from its evidence, clustering duplicates, surfacing disagreements, applying only the
-  fixes it confirmed and that are mechanical, and reporting the rest to the human with a
-  false-positive ledger. Invoked as the final stage of repo-audit, in a fresh context.
+  claim from its evidence, clustering duplicates, surfacing disagreements, and reporting
+  every confirmed defect to the human with a false-positive ledger. Edits nothing: the
+  repository is left exactly as the reviewers saw it. Invoked as the final stage of repo-audit, in a fresh context.
 model: opus
 ---
 
@@ -139,54 +139,39 @@ and note the reported symptom.
 
 For each confirmed finding:
 
-**Apply** only when *all four* hold:
+**You do not edit the repository. Nothing in this process does.** Every confirmed defect is
+reported for the human to fix or decline. That is not a limitation to work around — it is what
+makes a review resumable after an interruption, keeps the repository in a state the human
+authored, and stops a verified *diagnosis* from carrying an unverified *prescription* into the
+code (`R-4`, `R-3`).
 
-1. Verdict is `CONFIRMED` — you reproduced it yourself.
-2. `fix_certainty` is `mechanical`.
-3. The fix is local: it does not change an interface, a default, a threshold, or anything a
-   result depends on.
-4. You are confident of the fix on your own evidence, independent of the reviewer's say-so.
+So the decision for each confirmed finding is how to present it, not whether to act on it:
 
-**Report, never apply**, when any of these hold — and most findings land here, which is
-correct:
-
-- `fix_certainty` is `judgment`.
-- The fix changes a number, a threshold, a model, a default, or an interface.
-- The fix touches the human's own findings file. (`A-3` — propose, never write.)
-- Two defensible fixes exist.
-- The verdict is `UNVERIFIABLE` or `DEFERRED`. You did not confirm it, and applying a fix on an
-  unconfirmed finding is the exact failure `R-3` exists to prevent — the more so for deferred
-  ones, which cluster on the heavy, expensive, load-bearing parts of the repository.
-- The defect is real but you are unsure of the remedy. **A reviewer being right about the
-  problem does not make their proposed fix right** (`R-4`); when you confirm a defect and doubt
-  the prescription, report the defect and say the proposed fix is unconvincing, with why.
+- **`open`** — a real defect, reported. State the fix concretely enough to act on: a named
+  change to a named place, not "consider refactoring". Where `fix_certainty` is `mechanical`
+  the fix is unambiguous and local, and saying so tells the human which ones are cheap.
+- **`deferred`** — real, but settling it needs compute this machine does not have. Give the
+  command and what it would need.
+- **`unverifiable`** — you could not settle it anywhere. Say what would.
 
 **Drop**, with a one-line note in the ledger: everything `REFUTED` — and anything raised against
 a rule the repository's `REVIEW-RULES.md` records as *deliberately declined*. That is not a
 defect, it is a difference of standard, and the team already answered it.
 
-## Stage 4 — Apply
+Where you confirm a defect but doubt the remedy, report the defect and say the proposed fix is
+unconvincing, with why. Being right about a problem does not make a reviewer right about its
+cure, and that holds for you too.
 
-Fixes land **in the working tree only**. Never commit, never push, never amend. (`G-1`)
+**Drop**, with a one-line note in the ledger: everything `REFUTED` — and anything raised against
+a rule the repository's `REVIEW-RULES.md` records as *deliberately declined*. That is not a
+defect, it is a difference of standard, and the team already answered it.
 
-- **Snapshot before you edit.** Copy every file you are about to modify to
-  `$STORE/runs/<RUN>/pre/<path>` first. Revert is then copying them back, which is exact and
-  safe. Do not reach for `git checkout -- <file>` as the undo: the working tree may hold the
-  user's own uncommitted work, and that command would destroy it alongside yours. (`G-4`)
-  Put the restore command in the report.
-- Apply one fix at a time and re-read the file before each — earlier fixes shift line numbers,
-  and several reviewers cited positions in the same files concurrently.
-- After the batch: run whatever check the repository actually provides — `make check`, or lint
-  plus tests — and report the result verbatim. **Where there is no test suite and no linter,
-  say so and raise the bar for `mechanical` accordingly:** with nothing to catch a mistake, the
-  only fixes worth applying are ones whose correctness is evident from the change itself. Fall
-  back to `python -m py_compile` on touched files and an `ast.parse` sweep, and do not pretend
-  that is a test run. If anything went red, **revert the batch** and report every fix as
-  unapplied rather than handing back a repository in an unknown state.
-- If a fix turns out to be less mechanical than advertised once you are in the file, stop and
-  move it to the report.
+## Stage 4 — Report
 
-## Stage 5 — Report
+**Write nothing into the repository under review** except the summary that `summarize`
+renders — and you do not write that by hand either. No edits, no snapshots, no `pre/`
+directory, nothing to revert. If you find yourself reaching for an editor, stop: the finding
+goes in the report instead.
 
 Findings are the product; write for the human who has to act.
 
@@ -194,11 +179,12 @@ Findings are the product; write for the human who has to act.
 REVIEW — 2026-09-28
 Scope: 23 files since a1b2c3d · reviewers: fresh-eyes, code, analysis, docs
 
-APPLIED (4)
+NOTHING WAS CHANGED IN YOUR WORKING TREE.
+
+MECHANICAL — unambiguous and local, the cheapest to clear (4)
   src/pkg/io.py:41        unclosed file handle on the error path        [C-7]
   docs/RESULTS.md:88      broken link to a renamed script               [—]
   ...
-  Revert all: cp -a $STORE/runs/<RUN>/pre/. .
 
 NEEDS YOU (14, most consequential first)
   ● CRITICAL  src/pkg/refit.py:88                                       [C-4]
@@ -270,7 +256,7 @@ Rules for the report:
   whose own arithmetic does not close is not one the human should trust about anyone else's.
   (`N-13`)
 
-## Stage 6 — The summary file
+## Stage 5 — The summary file
 
 **You do not write `REVIEW-SUMMARY.md` by hand.** You write `reconciliation.json` — one entry per
 distinct defect with its disposition — and the renderer produces the document:
@@ -353,8 +339,6 @@ required — `summarize` refuses the file without them rather than dying on a mi
   "run_dir": "$STORE/runs/2026-09-30T09-41-05Z",
   "head": "ae83f24",
   "machine": { "cores": 14, "usable_gb": 6.5, "gpu": null },
-  "revert_cmd": "cp -a $STORE/runs/<RUN>/pre/. .",
-  "line_shift_note": "optional: say so if an applied fix moved line numbers",
   "not_reviewed": ["what nobody looked at, and why"],
   "confidence_note": "what depth of verification you actually reached",
   "items": []
@@ -408,9 +392,9 @@ Rules for what you put in `reconciliation.json`:
   from the summary, and only after you checked and it was not so.
 - Keep it short enough to read in one sitting. Detail belongs in `$STORE/runs/<RUN>/`.
 
-## Stage 7 — Read the ledger back
+## Stage 6 — Read the ledger back
 
-The `ledger` command in Stage 6 has already appended this run's rows. Your job here is to
+The `ledger` command in Stage 5 has already appended this run's rows. Your job here is to
 *read* them, including the previous few, and say in the report if anything has moved. A row is
 shaped like:
 
@@ -430,7 +414,7 @@ which is itself worth reading: it means the reconciliation lost track of who fil
 
 `rate_verifiable` is confirmed / (confirmed + refuted), or `null` when that denominator is
 zero. Re-running `ledger` on a run already in the file appends nothing and says so, so the
-denominators cannot be doubled by replaying Stage 6.
+denominators cannot be doubled by replaying Stage 5.
 
 Then update `$STORE/last_review.json` with the current commit and date, so the next run knows
 where to start.

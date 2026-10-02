@@ -45,7 +45,7 @@ it is defending against, and what has actually been measured rather than hoped f
    count can lie)   │ ledger     confirmed / refuted rates  │
                     └──────────────────┬───────────────────┘
                                        ▼
-                   fixes in the working tree (never committed)
+                   reports only — nothing in the repo is edited
                    + REVIEW-SUMMARY.md  + open_defects.json
 ```
 
@@ -94,9 +94,10 @@ however sure it sounds.
 
 It reads the JSON and nothing else — no reviewer prose, because prose transmits confidence and
 re-introduces the anchoring. It re-runs each command, re-reads each quote, re-derives each
-argument. It applies a fix only when it confirmed the defect *itself* and the fix is mechanical
-and local; everything else goes to the human. Fixes land in the working tree, never a commit,
-and a red check reverts the whole batch rather than handing back a half-applied repository.
+argument. It then reports — it does not act. Nothing in a review edits the repository, which
+buys three things at once: an interrupted run resumes by scanning for the files each stage
+produces, the working tree stays something a human authored, and a verified *diagnosis* never
+carries an unverified *prescription* into the code (`R-4`).
 
 A reviewer being right about a problem does not make its proposed fix right, and the two are
 judged separately.

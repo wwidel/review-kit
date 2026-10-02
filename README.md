@@ -141,8 +141,7 @@ review/
   last_review.json    where the last run got to — a bookmark, not a timer
   access.jsonl        every file a tool touched, written by the hook, not by any agent
   runs/<run-id>/      manifest, machine, repo_profile, probes, per-reviewer findings,
-                      clusters, recurrence, reconciliation.json, and pre/ snapshots of
-                      any file that was fixed
+                      clusters, recurrence and reconciliation.json
 ```
 
 ## Run
@@ -186,7 +185,7 @@ reconcile.
                     │
                     ▼
               reconciler ──▶ reconciliation.json ──▶ REVIEW-SUMMARY.md · ledger · carryover
-             (fresh context,                         fixes in the working tree,
+             (fresh context,                         reports only, edits nothing,
               verifies, does not                     never committed
               summarise; reads JSON,
               never reviewer prose)
