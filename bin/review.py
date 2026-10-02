@@ -10,7 +10,7 @@ Stdlib only. Python 3.8+.
 """
 from __future__ import annotations
 
-import argparse, hashlib, json, os, re, shutil, subprocess, sys, datetime, warnings
+import argparse, hashlib, json, os, re, shlex, shutil, subprocess, sys, datetime, warnings
 from pathlib import Path
 
 SEVERITIES = ["critical", "major", "minor", "trivial"]
@@ -487,6 +487,104 @@ def cmd_scope(a):
         sys.exit(3)
 
 
+# ---------------------------------------------------------------- runs
+
+REVIEWER_LEGS = ("fresh-eyes", "code", "analysis", "docs")
+
+
+def run_state(run_dir: Path, repo: Path) -> dict:
+    """What a run directory contains, and whether it can still be resumed.
+
+    Every stage of a review is a pure producer of one file, so "where did this get to" is
+    answerable by looking rather than by remembering. Staleness is the other half: a run
+    whose manifest no longer matches the working tree cannot be resumed, because the findings
+    cite line numbers in files that have since moved.
+    """
+    man = _load_json(run_dir / "manifest.json")
+    legs = {leg: (run_dir / f"findings-{leg}.json").exists() for leg in REVIEWER_LEGS}
+    extra = sorted(q.name for q in run_dir.glob("findings-*.json")
+                   if q.stem[len("findings-"):] not in REVIEWER_LEGS)
+    st = {"run_id": run_dir.name, "path": str(run_dir),
+          "has_manifest": bool(man),
+          "legs_done": [k for k, v in legs.items() if v],
+          "legs_missing": [k for k, v in legs.items() if not v],
+          "other_findings": extra,
+          "clustered": (run_dir / "clusters.json").exists(),
+          "reconciled": (run_dir / "reconciliation.json").exists()}
+
+    drifted, missing = [], []
+    for f in man.get("files", []):
+        q = repo / f["path"]
+        if not q.exists():
+            missing.append(f["path"])
+        elif f.get("sha256") and sha256_of(q) != f["sha256"]:
+            drifted.append(f["path"])
+    st["drifted"] = drifted
+    st["gone"] = missing
+    st["stale"] = bool(drifted or missing)
+
+    if not st["has_manifest"]:
+        st["state"] = "unusable: no manifest"
+    elif st["reconciled"]:
+        st["state"] = "complete"
+    elif st["stale"]:
+        st["state"] = "stale: the working tree moved since this run was scoped"
+    elif not st["legs_missing"]:
+        st["state"] = "resumable: all reviewers done, needs the reconciler"
+    elif st["legs_done"]:
+        st["state"] = ("resumable: needs reviewer(s) "
+                       + ", ".join(st["legs_missing"]) + ", then the reconciler")
+    else:
+        st["state"] = "resumable: no reviewer has run yet"
+    return st
+
+
+def cmd_runs(a):
+    """List this repository's runs and say which, if any, can be resumed.
+
+    Without this, a session that died mid-run could only be resumed by hand: Stage 0 mints a
+    new run directory unconditionally, so a fresh `/repo-audit` re-ran four reviewers whose
+    findings were already on disk and paid for.
+    """
+    repo = Path(a.repo).resolve()
+    runs_dir = store_path(repo) / "runs"
+    if (repo / ".review").exists():
+        runs_dir = repo / ".review" / "runs"
+    if not runs_dir.is_dir():
+        print(f"no runs yet for {repo}")
+        return
+    states = [run_state(d, repo) for d in sorted(runs_dir.iterdir()) if d.is_dir()]
+    if not states:
+        print(f"no runs yet for {repo}")
+        return
+    for st in states[-a.limit:]:
+        print(f"{st['run_id']}  {st['state']}")
+        if st["has_manifest"]:
+            print(f"    reviewers: {len(st['legs_done'])}/4 done"
+                  + (f" ({', '.join(st['legs_done'])})" if st["legs_done"] else "")
+                  + (f" · missing: {', '.join(st['legs_missing'])}" if st["legs_missing"] else "")
+                  + (f" · clustered" if st["clustered"] else ""))
+        if st["other_findings"]:
+            print(f"    also present: {', '.join(st['other_findings'])}")
+        if st["stale"]:
+            n = len(st["drifted"]) + len(st["gone"])
+            shown = (st["drifted"] + st["gone"])[:4]
+            print(f"    {n} scoped file(s) changed or vanished since: {', '.join(shown)}"
+                  + ("…" if n > 4 else ""))
+            print("    Do NOT resume this one — its findings cite line numbers that have moved.")
+    resumable = [st for st in states if st["state"].startswith("resumable")]
+    print()
+    if resumable:
+        last = resumable[-1]
+        print(f"RESUMABLE: {last['run_id']}")
+        print(f"  D={last['path']}")
+        print("  Reuse that run id and directory verbatim; do not mint a new one.")
+        print("  Skip Stage 0 — manifest, machine, probes and profile are already there.")
+        print("  Skip every reviewer whose findings file is present.")
+    else:
+        print("Nothing to resume; a new run starts clean.")
+
+
 # ---------------------------------------------------------------- preflight
 
 # Every settings file a hook can legitimately live in. Checking only the first two reported
@@ -653,6 +751,80 @@ def cmd_estimate(a):
 
 # ---------------------------------------------------------------- machine
 
+# What a reviewer would want to import to re-derive a number. Order matters only for display.
+PROBE_MODULES = ("numpy", "pandas", "scipy", "sklearn", "polars", "lightgbm", "xgboost",
+                 "torch", "matplotlib", "yaml")
+
+# Where a Python environment hides, relative to a repository or to $HOME. Deliberately shallow:
+# a full-tree search on a repo with a vendored node_modules costs more than it is worth.
+VENV_DIRS = (".venv", "venv", "env", ".env", ".virtualenv")
+
+
+def _interpreter_modules(python: str, modules=PROBE_MODULES) -> dict:
+    """Which of `modules` this interpreter can import, in ONE subprocess rather than ten."""
+    script = ("import importlib.util as u,json,sys;"
+              "print(json.dumps({m: u.find_spec(m) is not None for m in " + repr(list(modules)) + "}))")
+    rc, out, _ = sh(f"{shlex.quote(python)} -c {shlex.quote(script)}")
+    if rc != 0:
+        return {m: False for m in modules}
+    try:
+        return json.loads(out)
+    except ValueError:
+        return {m: False for m in modules}
+
+
+def find_environments(repo: Path = None):
+    """Every Python environment on this machine that might let a reviewer re-derive a number.
+
+    The kit used to probe `sys.executable` alone — the interpreter running this script, which
+    on a machine whose work happens under `uv run` or in a per-project venv is the one
+    interpreter with nothing installed. It then told four reviewers that nothing was runnable,
+    so every `command` evidence came back `ran: false` and `validate` capped those findings at
+    `likely`. The review was weaker than the machine allowed, and nothing said so.
+
+    Searching is shallow and read-only: the repo's own venv directories, `~/.venvs/*`,
+    `~/.virtualenvs/*`, conda prefixes, and whatever is on PATH.
+    """
+    seen, found = set(), []
+    cands = [("running this script", sys.executable)]
+    if repo:
+        for d in VENV_DIRS:
+            cands.append((f"{repo.name}/{d}", str(repo / d / "bin" / "python")))
+    for parent in (Path.home() / ".venvs", Path.home() / ".virtualenvs"):
+        try:
+            for d in sorted(parent.iterdir()):
+                cands.append((f"~/{parent.name}/{d.name}", str(d / "bin" / "python")))
+        except OSError:
+            pass
+    for base in (Path.home() / "miniconda3" / "envs", Path.home() / "anaconda3" / "envs"):
+        try:
+            for d in sorted(base.iterdir()):
+                cands.append((f"conda:{d.name}", str(d / "bin" / "python")))
+        except OSError:
+            pass
+    rc, out, _ = sh("command -v python3 python 2>/dev/null")
+    for line in out.splitlines():
+        cands.append(("on PATH", line.strip()))
+
+    for label, py in cands:
+        if not py:
+            continue
+        # Deduplicate on the path AS GIVEN, never on its resolved target. A virtualenv's
+        # bin/python is a symlink to the base interpreter, so resolving first collapsed every
+        # venv onto /usr/bin/python3 and the search returned exactly the interpreter it was
+        # written to look past. Running the symlink is what selects the venv's site-packages.
+        key = os.path.abspath(os.path.expanduser(py))
+        if key in seen or not Path(py).exists() or not os.access(py, os.X_OK):
+            continue
+        seen.add(key)
+        mods = _interpreter_modules(py)
+        n = sum(1 for v in mods.values() if v)
+        found.append({"label": label, "python": py, "n_modules": n, "importable": mods})
+    # Most useful first: the interpreter that can import the most of what a reviewer needs.
+    found.sort(key=lambda e: -e["n_modules"])
+    return found
+
+
 def cmd_machine(a):
     cores = os.cpu_count() or 1
     usable_gb = total_gb = None
@@ -668,16 +840,46 @@ def cmd_machine(a):
     rc, gpu, _ = sh("nvidia-smi -L")
     gpus = [l for l in gpu.splitlines() if l.strip()] if rc == 0 else []
 
-    frameworks = {}
-    for mod in ("torch", "numpy", "pandas", "scipy", "polars", "sklearn", "lightgbm", "yaml"):
-        rc, _, _ = sh(f"{sys.executable} -c 'import {mod}'")
-        frameworks[mod] = rc == 0
+    repo = Path(a.repo).resolve() if a.repo else None
+    envs = find_environments(repo)
+    if a.python:
+        # An explicit --python wins outright: the caller knows something the search cannot,
+        # such as that the project runs under `uv run`. It is still probed, not trusted.
+        if not Path(a.python).exists():
+            die(f"--python {a.python} does not exist.")
+        mods = _interpreter_modules(a.python)
+        # abspath, not resolve: a venv's python symlinks to the base interpreter, so
+        # resolving here would discard every venv as a "duplicate" of the given one.
+        given = os.path.abspath(os.path.expanduser(a.python))
+        envs = ([{"label": "given with --python", "python": a.python,
+                  "n_modules": sum(1 for v in mods.values() if v), "importable": mods}]
+                + [e for e in envs
+                   if os.path.abspath(os.path.expanduser(e["python"])) != given])
+    best = envs[0] if envs else None
+    # `importable` keeps its meaning — what a reviewer can actually use — but now answers for
+    # the BEST interpreter on the machine rather than whichever one happens to run this file.
+    frameworks = best["importable"] if best else {m_: False for m_ in PROBE_MODULES}
 
     m = {"cores": cores, "usable_gb": usable_gb, "total_gb": total_gb,
-         "gpu": gpus or None, "free_disk_gb": free_disk_gb, "importable": frameworks}
+         "gpu": gpus or None, "free_disk_gb": free_disk_gb,
+         "python": best["python"] if best else sys.executable,
+         "python_label": best["label"] if best else "running this script",
+         "importable": frameworks,
+         # Every candidate, so a reviewer that needs a module the best one lacks can see
+         # whether another environment has it rather than concluding it cannot check.
+         "environments": [{k: e[k] for k in ("label", "python", "n_modules")} for e in envs]}
     if a.out:
         write_atomic(Path(a.out), json.dumps(m, indent=2))
     print(json.dumps(m, indent=2))
+    if best and best["n_modules"] == 0:
+        print("  note: no interpreter on this machine can import any of "
+              + ", ".join(PROBE_MODULES) + ".\n  Reviewers will verify by reading. If the "
+              "project uses `uv run` or a venv this search missed,\n  pass --python so they "
+              "can re-derive numbers instead.", file=sys.stderr)
+    elif best:
+        print(f"  reviewers should run commands with: {best['python']}  "
+              f"({best['label']}, {best['n_modules']}/{len(PROBE_MODULES)} modules)",
+              file=sys.stderr)
 
 
 # ---------------------------------------------------------------- characterize
@@ -2175,6 +2377,11 @@ def main():
                         "are never demoted however long (default 500)")
     p.set_defaults(fn=cmd_scope)
 
+    p = sub.add_parser("runs", help="list this repo's runs and say which can be resumed")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--limit", type=int, default=5, help="how many recent runs to show")
+    p.set_defaults(fn=cmd_runs)
+
     p = sub.add_parser("preflight", help="check the conditions a review depends on")
     p.add_argument("--repo", required=True); p.set_defaults(fn=cmd_preflight)
 
@@ -2192,8 +2399,13 @@ def main():
                    help="exit 3 if the estimate exceeds this many tokens")
     p.set_defaults(fn=cmd_estimate)
 
-    p = sub.add_parser("machine", help="measure the compute budget")
-    p.add_argument("--out"); p.set_defaults(fn=cmd_machine)
+    p = sub.add_parser("machine", help="measure the compute budget and find a usable Python")
+    p.add_argument("--out")
+    p.add_argument("--repo", help="also look for a virtualenv inside this repository")
+    p.add_argument("--python", help="an interpreter to prefer over anything discovered — use "
+                                    "it when the project runs under `uv run` or an env this "
+                                    "search cannot see")
+    p.set_defaults(fn=cmd_machine)
 
     p = sub.add_parser("characterize", help="signals about the repo's posture")
     p.add_argument("--repo", required=True); p.add_argument("--out")

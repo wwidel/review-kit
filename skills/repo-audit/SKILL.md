@@ -46,6 +46,13 @@ out of the repository for the reviewer stage; that only ever hid the working-tre
 file, a crash-recovery path and a way to strand the deliverable outside the repo. **So the
 instruction is the protection, and it has to be in every reviewer's prompt — not assumed.**
 
+**Check for an interrupted run before starting a new one.** `runs` lists this repository's
+runs and says which, if any, can be resumed. A session killed by a usage limit or a dead VM
+leaves every finished reviewer's findings on disk; minting a new run directory throws that away
+and pays for all four legs again. It also refuses to offer a run whose manifest no longer
+matches the working tree — findings cite line numbers, and a tree that moved makes them
+meaningless.
+
 **Run `preflight` first and stop if it fails.** It checks the one condition everything else
 rests on: that this session is *in* the repository being reviewed. The access-log hook follows
 the working directory, so a review launched from somewhere else records its reads against
@@ -62,9 +69,18 @@ the install claimed a suffixed one rather than overwriting it.
 python3 <review-kit>/bin/review.py preflight --repo .   # STOP if this fails
 STORE=$(python3 <review-kit>/bin/review.py store --repo .)
 SUMMARY=$(python3 <review-kit>/bin/review.py store --repo . --summary)
+
+# Is there an interrupted run to resume? ALWAYS check before minting a new one.
+python3 <review-kit>/bin/review.py runs --repo .
+
+# If it names a RESUMABLE run, use that id and directory verbatim and SKIP the rest of
+# this block — the manifest, machine, probe and profile artefacts are already there:
+#   RUN=<that run id>; D=$STORE/runs/$RUN
+# Otherwise start clean:
 RUN=$(date -u +%Y-%m-%dT%H-%M-%SZ); D=$STORE/runs/$RUN; mkdir -p $D
-python3 <review-kit>/bin/review.py scope --repo . --out $D --list [--since <ref>]
-python3 <review-kit>/bin/review.py machine --out $D/machine.json
+python3 <review-kit>/bin/review.py scope --repo . --out $D --list
+#   add --since <ref> to that command for an incremental window
+python3 <review-kit>/bin/review.py machine --repo . --out $D/machine.json
 python3 <review-kit>/bin/review.py characterize --repo . --out $D/repo_profile.json
 python3 <review-kit>/bin/review.py probe --manifest $D/manifest.json --out $D/probes.json
 python3 <review-kit>/bin/review.py estimate --manifest $D/manifest.json
@@ -237,7 +253,10 @@ The prompts, in shape — one per reviewer:
 > reference tier is described there and is to be queried with a script, never read — list those
 > in `scope.files_queried`. `<D>/probes.json` holds the mechanical checks, already run: treat
 > each hit as a place to look, never as a finding, and read the code before filing anything.
-> This machine has `<cores>` cores, `<gb>` GB usable, `<gpu or "no GPU">`. Do not run anything
+> This machine has `<cores>` cores, `<gb>` GB usable, `<gpu or "no GPU">`. **Run Python with
+> `<the `python` field from machine.json>`** — it is the interpreter on this machine that can
+> import the most of what you need, and `machine.json` lists what it has. Bare `python3` may
+> be an empty system interpreter. Do not run anything
 > heavier than that: classify a command before issuing it, never run a heavy one to check
 > something, and never substitute a sample for the real run. Record what you deferred and what
 > it would need.

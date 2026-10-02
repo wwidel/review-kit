@@ -53,7 +53,10 @@ somebody else's file. Never hard-code it.
 
 You are about to run other people's commands. The budget was measured for you into
 `$D/machine.json`; read it, and cross-check it against the `machine` block each reviewer
-recorded. Do this before the first verdict, not after something is swapping. (`M-1`) Every `command` evidence carries a
+recorded. **Its `python` field names the interpreter to run commands with** — the one on this
+machine that can import the most of what a reviewer would need; `importable` says what that is
+and `environments` lists the alternatives. A bare `python3` may be a system interpreter with
+nothing installed, which turns a checkable claim into an unverifiable one. Do this before the first verdict, not after something is swapping. (`M-1`) Every `command` evidence carries a
 `cost`: run the `cheap` ones, **never run a `heavy` one**, and do not take a reviewer's `cheap`
 label on trust — read the command yourself before issuing it, because a reviewer that
 misclassified a command is exactly the sort of error you exist to catch, and this one kills the
