@@ -139,9 +139,10 @@ review/
   open_defects.json   every confirmed defect across runs, and what became of it
   ledger.jsonl        one row per reviewer per run: reported, confirmed, refuted, deferred
   last_review.json    where the last run got to — a bookmark, not a timer
-  access.jsonl        every file a tool touched, written by the hook, not by any agent
+  access.jsonl        every file a tool touched, and every reading command, written by the
+                      hook, not by any agent
   runs/<run-id>/      manifest, machine, repo_profile, probes, per-reviewer findings,
-                      clusters, recurrence and reconciliation.json
+                      clusters, recurrence, reconciliation.json and tree-before.json
 ```
 
 ## Run
@@ -331,19 +332,20 @@ half, not the judgement half.
 
 | command | does |
 |---|---|
-| `scope` | the review window + a three-way manifest: a *review* tier read in full (source, Markdown, and every other file under the threshold); a *tabular* reference tier — data files at any size, plus any other file over ~500 lines that is neither source nor Markdown — described by size, sha256, columns and first row, queried by script and never read; and *opaque* files (decks, PDFs, spreadsheets, images, archives, model artefacts) listed so a reviewer knows they exist but can neither read nor query them. Source and Markdown are never demoted, however long: a long script or README is where a defect hides, so `scope` names the oversized ones instead. Files it cannot place go under `unclassified`, paths it cannot open — a dangling data symlink, most often — under `unreadable`, directories pruned by name under `skipped_dirs`, and files removed in a `--since` window under `deleted`; all four are listed rather than dropped, so the manifest never claims a scope it did not achieve. Exits non-zero on an empty scope |
+| `scope` | the review window + a three-way manifest: a *review* tier read in full (source, Markdown, and every other file under the threshold); a *tabular* reference tier — data files at any size, plus any other file over ~500 lines that is neither source nor Markdown — described by size, sha256, columns and first row, queried by script and never read; and *opaque* files (decks, PDFs, spreadsheets, images, archives, model artefacts) listed so a reviewer knows they exist but can neither read nor query them. Source and Markdown are never demoted, however long: a long script or README is where a defect hides, so `scope` names the oversized ones instead. A file with an unknown suffix that git tracks is sniffed rather than dropped — binary content makes it opaque, text is placed by length like any other file; an untracked one (an ignored `mlruns/`, a DVC cache) goes under `unclassified`. Paths it cannot open — a dangling data symlink, most often — under `unreadable`, directories pruned by name under `skipped_dirs`, and files removed in a `--since` window under `deleted`; all four are listed rather than dropped, so the manifest never claims a scope it did not achieve. Exits non-zero on an empty scope |
 | `probe` | runs ~23 mechanical checks once for every reviewer — seeds, unsafe deserialisation, broad excepts, dynamic dispatch, non-atomic writes, path literals, magic numbers, plus AST checks for unparseable files, names redefined in one scope, and functions with identical bodies |
 | `machine` | cores, usable memory, disk, GPU, and which frameworks are importable |
 | `characterize` | signals about the repo's posture — tests, linter, CI, commit recency. A hint for calibrating severity, never a finding |
 | `validate` | enforces the findings contract: missing fields, a heavy command that was run, `certain` resting on reasoning, an unread scope not declared |
-| `audit` | compares `files_read` against the harness-written access log — the one check an agent cannot defeat from inside its own context. `--agent` scopes it to one reviewer's reads; `--list-agents` prints the ids in the log so each can be matched to a reviewer; `--run-dir` dates the run so a read from an earlier one cannot vouch for this one |
+| `audit` | compares `files_read` against the harness-written access log — the one check an agent cannot defeat from inside its own context. `--agent` scopes it to one reviewer's reads; `--list-agents` prints the ids in the log so each can be matched to a reviewer; `--run-dir` dates the run so a read from an earlier one cannot vouch for this one. Exits 1 on an UNSUPPORTED CLAIM — a file named in no reading command — and 3 on UNRESOLVED, a file named in a reading command the hook could not follow, printed so a person can settle it |
+| `residue` | `--save` snapshots `git status`, ignored files included, before the reviewers run; afterwards it names what the run created or changed as git sees it, and exits 1 if there is any. It cannot see inside an untracked or ignored directory that already existed, or an edit to an existing ignored file |
 | `fingerprint` | stamps a stable id from the file path and a normalised source anchor, so a defect keeps its identity across runs even when lines move |
 | `cluster` | groups findings that share a fingerprint (corroboration) and lists near-misses as candidates for the reconciler to judge |
 | `match` | which defects also appeared in the previous run and are still open |
 | `estimate` | counts the files and lines a full review would read and prices it in tokens, before anything is spawned. `--budget N` exits non-zero when the estimate exceeds N |
 | `store` | prints this repo's review store; `--summary` the summary's claimed filename at the repo root; `--kit` where the kit itself lives. All three come from the install record — derive them, never hard-code them |
 | `preflight` | checks the conditions a review depends on — that the session is inside the repository under review, that the kit is installed for it, whether the hook is wired — and refuses otherwise |
-| `coverage` | per-(file, reviewer) record of what has been reviewed, at which sha256, and how stale each file is; names files never reviewed |
+| `coverage` | per-(file, reviewer) record of what has been reviewed, at which sha256, and how stale each file is; names files never reviewed, and counts opaque ones separately since no reviewer can read them |
 | `carryover` | tracks confirmed defects across runs and classifies each into one of eleven outcomes — `re-reported`, `not-re-checked`, `plausibly-fixed`, `file-deleted`, `fixed-this-run`, `refuted-this-run`, `regressed`, `reported-not-carried`, `unanchored-not-checkable`, `anchor-ambiguous`, and **`missed`**. The reconcile-reviews skill says which of them need a human |
 | `summarize` | renders `REVIEW-SUMMARY.md` from `reconciliation.json`, so no count in it can disagree with the items beneath it |
 | `ledger` | appends per-reviewer confirmed/refuted/deferred rows, with rates computed over verifiable findings |
@@ -367,7 +369,14 @@ being checked. In `.claude/settings.json`:
 ```
 
 The hook takes no configuration: it logs to the store of whichever repository the session is
-in, and writes nothing at all for a directory that has no store. Without the hook, `audit`
+in, and writes nothing at all for a directory that has no store. For a Bash command it follows
+`cd` (scoped to its subshell), simple `VAR=value` assignments, `for` loops, brace lists and a
+plain `find … -exec cat` or `find … | xargs cat`, and resolves each name against the directory
+the shell would be in, so `cd src && for f in a b; do cat -n $f.py; done` logs both files. It
+credits a file only when its content came back: not `wc`, `ls` or `echo`, not `grep -l` or
+`grep -q`, and not a reader whose output went to a file or into `| wc`. It also stores the raw
+command, which is what lets `audit` tell a read it could not follow from a file no command
+named. Without the hook, `audit`
 refuses to run rather than reporting a pass it cannot support — and it ignores records
 older than the run it is checking, so a read from an earlier run cannot vouch for this one.
 

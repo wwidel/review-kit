@@ -47,8 +47,13 @@ say which tiers you skipped rather than reporting a clean run. (`T-1`)
 Run whatever the repo already has, and **report what it says rather than re-deriving it**:
 
 ```bash
-ruff check . ; mypy src/ ; pytest -q --collect-only 2>&1 | tail -5
+ruff check --no-cache . ; mypy --cache-dir=/dev/null src/
+PYTHONDONTWRITEBYTECODE=1 pytest -q --collect-only -p no:cacheprovider 2>&1 | tail -5
 ```
+
+The flags matter: without them each tool writes a cache into the repository, and you are
+not to leave anything there. The first live run of this kit left a `.pytest_cache/` behind
+from exactly this line.
 
 Anything a linter or type checker catches is not your job — you would only be producing a
 worse version of its output. Spend your attention on what they cannot see.

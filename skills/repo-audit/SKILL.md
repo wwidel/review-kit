@@ -78,6 +78,8 @@ python3 <review-kit>/bin/review.py runs --repo .
 #   RUN=<that run id>; D=$STORE/runs/$RUN
 # Otherwise start clean:
 RUN=$(date -u +%Y-%m-%dT%H-%M-%SZ); D=$STORE/runs/$RUN; mkdir -p $D
+python3 <review-kit>/bin/review.py residue --repo . --run-dir $D --save   # before anything runs
+#   outside a git repository this refuses; note that residue is unchecked and carry on
 python3 <review-kit>/bin/review.py scope --repo . --out $D --list
 #   add --since <ref> to that command for an incremental window
 python3 <review-kit>/bin/review.py machine --repo . --out $D/machine.json
@@ -256,7 +258,11 @@ The prompts, in shape — one per reviewer:
 > This machine has `<cores>` cores, `<gb>` GB usable, `<gpu or "no GPU">`. **Run Python with
 > `<the `python` field from machine.json>`** — it is the interpreter on this machine that can
 > import the most of what you need, and `machine.json` lists what it has. Bare `python3` may
-> be an empty system interpreter. Do not run anything
+> be an empty system interpreter. Prefix every Python command with `PYTHONDONTWRITEBYTECODE=1`,
+> and pass `-p no:cacheprovider` to pytest, `--no-cache` to ruff and `--cache-dir=/dev/null` to
+> mypy — each otherwise writes a cache into the repository. Read files with the Read tool or
+> by naming them to `cat`/`sed -n`/`head`; a read through `$(...)`, or one whose output went
+> to a file or into `wc`, cannot be verified and will be questioned. Do not run anything
 > heavier than that: classify a command before issuing it, never run a heavy one to check
 > something, and never substitute a sample for the real run. Record what you deferred and what
 > it would need.
@@ -347,6 +353,15 @@ opened — and on a second audit of the same repository that covers most of the 
 takes the floor from the run's own `manifest.json`, and `audit` refuses to run without either
 that or an explicit `--since`.
 
+**Exit 3 means UNRESOLVED, not UNSUPPORTED.** The hook follows `cd`, simple variables and
+`for` loops, but a command it cannot follow — a `$(...)`, a function, a loop it does not
+unroll — leaves a real read unlogged. `audit` lists such a file with the reading command that
+names it. Read that command and decide: if it plainly printed the file, the read is
+supported; if it could not have (a `grep -l`, a command that failed), it is not. Report the
+outcome as checked by hand, with the command. Never explain an unlogged read by guessing at
+how the reviewer might have read it, and never call it unprovable — the command is there.
+Exit 1 — UNSUPPORTED CLAIM — means the file is named in no reading command at all.
+
 The ids are the harness's, not names you choose, so `audit --list-agents` prints the ones in
 the log together with what each touched; match them to reviewers by those paths. **If the
 mapping cannot be established, do not guess it.** Skip `audit` and say in the handover that
@@ -387,12 +402,25 @@ prescription into your code.
 
 ## Stage 3 — Hand over
 
+First check what the run left in the working tree:
+
+```bash
+python3 <review-kit>/bin/review.py residue --repo . --run-dir $D
+```
+
+It compares against the snapshot taken before the reviewers ran, ignored files included.
+Anything it names goes in the handover with what it is; do not delete it yourself. A run
+resumed from a directory with no snapshot cannot be checked, and nor can a directory that is
+not a git repository (`residue --save` refuses there) — say so in either case.
+
 Relay the reconciler's report to the user. Add nothing of your own except:
 
 - What was in scope and what was not, including the rotating slice.
 - Which reviewers ran, on which models.
 - Any reviewer that failed validation and was re-run, and whether it passed the second time.
-- Anything the scope audit flagged as an unsupported `files_read` claim.
+- Anything the scope audit flagged as an unsupported `files_read` claim, and every UNRESOLVED
+  file with how you settled it.
+- Anything `residue` reported.
 - Anything `coverage` reports as never reviewed or badly stale.
 - **Every defect the reconciler classified as `missed`** — confirmed in an earlier run, its file
   reviewed again this run, its source unchanged, and not re-reported. That is a reviewer false

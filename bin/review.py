@@ -28,13 +28,16 @@ SKIP_DIRS = {".git", "node_modules", "vendor", "dist", "build", "__pycache__",
 # and `.parquet` were declared tabular but missing here, so they never survived classify to
 # reach the tabular branch, which was dead for both.
 SOURCE_EXT = {e.lower() for e in {
-    ".py", ".pyx", ".sh", ".R", ".r", ".Rmd", ".jl", ".sql",
+    ".py", ".pyx", ".sh", ".R", ".r", ".Rmd", ".jl", ".sql", ".patch", ".diff",
     ".md", ".yml", ".yaml", ".toml", ".cfg", ".ini", ".json", ".txt",
     ".ipynb", ".csv", ".tsv", ".jsonl", ".parquet"}}
 
 # Source code and prose: always review tier, whatever their length. Demoting a long script
 # to "describe, do not read" hides exactly the file most worth reading.
-CODE_EXT = {e.lower() for e in {".py", ".pyx", ".sh", ".R", ".r", ".Rmd", ".jl", ".sql"}}
+# A .patch is code: in a competition repo it is usually the change made to a pinned
+# dependency, which the first live run left in no tier at all.
+CODE_EXT = {e.lower() for e in {".py", ".pyx", ".sh", ".R", ".r", ".Rmd", ".jl", ".sql",
+                                ".patch", ".diff"}}
 
 # Markdown is exempt from the length threshold: review-docs is the document-integrity leg and
 # demoting a long README to "query with a script" blinds it to the longest document in the
@@ -229,11 +232,40 @@ NAMED_CODE = {"Makefile", "makefile", "GNUmakefile", "Dockerfile", "Containerfil
               "Justfile", "justfile", "Rakefile", "Procfile", "Vagrantfile"}
 
 
+def looks_binary(p: Path) -> bool:
+    """A NUL byte in the first 8 KiB — git's own test. Unreadable counts as binary."""
+    try:
+        with p.open("rb") as f:
+            return b"\0" in f.read(8192)
+    except OSError:
+        return True
+
+
+def is_opaque(p: Path) -> bool:
+    """Listed but never read: a known opaque suffix, or an unknown suffix holding binary."""
+    ext = p.suffix.lower()
+    if ext in OPAQUE_EXT:
+        return True
+    if p.name in NAMED_CODE or ext in SOURCE_EXT:
+        return False
+    return looks_binary(p)
+
+
 def classify(p: Path):
-    """'source' if the file belongs in a tier, else None — the caller records the rest."""
+    """'source' if the file belongs in a tier, else None — the caller records the rest.
+
+    An unknown suffix is sniffed rather than rejected. Rejection put `l5kit.patch` and every
+    `.gitignore` in no tier on the first live run, so nobody was asked to read them; a text
+    file of unknown kind is placed by length like any other, and a binary one is opaque.
+    Only a file that cannot be opened is left unclassified.
+    """
     if p.name in NAMED_CODE or p.suffix.lower() in SOURCE_EXT:
         return "source"
-    return None
+    try:
+        with p.open("rb"):
+            return "source"
+    except OSError:
+        return None
 
 
 def is_readable(p: Path) -> bool:
@@ -278,7 +310,7 @@ def iter_source(repo: Path, rejected=None, unreadable=None, skipped=None):
 
 def describe_reference(p: Path, rel: str):
     """Enough for a reviewer to know what is in a file without reading it."""
-    opaque = p.suffix.lower() in OPAQUE_EXT
+    opaque = is_opaque(p)
     # A file can become unreadable between the walk and here — a race, a revoked permission,
     # a link whose target went away. Describing it as best we can beats ending the run.
     try:
@@ -287,6 +319,10 @@ def describe_reference(p: Path, rel: str):
         size, digest = None, None
     d = {"path": rel, "sha256": digest, "bytes": size,
          "kind": "opaque" if opaque else "tabular"}
+    # `kind` stays "tabular" for any queryable text, which is what the reviewers' skills key on;
+    # `text` tells a long log or lockfile from a CSV.
+    if not opaque and p.suffix.lower() not in TABULAR_EXT:
+        d["text"] = True
     if digest is None:
         d["note"] = f"could not be read when the manifest was built ({p}); treat as unchecked"
         return d
@@ -380,10 +416,22 @@ def cmd_scope(a):
     # names the file — which tells them what it is.
     summary = summary_name(repo)
     review, reference, oversized = [], [], []
+    # An unknown suffix is placed only if git tracks it. A tracked one was put there on
+    # purpose — a patch, an ignore file, a LICENSE. An untracked one is far more often an
+    # ignored tree of extensionless output (mlruns/, wandb/, a DVC cache), and placing those
+    # in any tier floods the manifest and the coverage record; they stay `unclassified`.
+    # Bytes, decoded as the filesystem does: with -z git prints names unescaped, and a
+    # tracked name that is not UTF-8 ended the whole audit at stage 0.
+    r_t = subprocess.run(["git", "ls-files", "-z"], cwd=repo, capture_output=True)
+    tracked = {os.fsdecode(x) for x in r_t.stdout.split(b"\0")} if r_t.returncode == 0 else set()
     for p in sorted(paths):
         if p.name == summary and p.parent == repo:
             continue
         rel = str(p.relative_to(repo))
+        if (p.suffix.lower() not in SOURCE_EXT and p.name not in NAMED_CODE
+                and rel not in tracked):
+            rejected.append(p)
+            continue
         if not is_readable(p):
             # It passed the walk and became unreadable since, or arrived through --since.
             unreadable.append(p)
@@ -393,11 +441,12 @@ def cmd_scope(a):
         # actually read. Length decides for everything else. One lower-cased suffix, compared
         # against sets that are themselves lower-cased at definition.
         ext = p.suffix.lower()
-        n = 0 if ext in OPAQUE_EXT or ext in BINARY_TABULAR_EXT else count_lines(p)
+        opaque = is_opaque(p)
+        n = 0 if opaque or ext in BINARY_TABULAR_EXT else count_lines(p)
         is_code = ext in CODE_EXT or ext in PROSE_EXT
         if is_code and n > a.reference_threshold:
             oversized.append((rel, n))
-        if ext in TABULAR_EXT or ext in OPAQUE_EXT or (n > a.reference_threshold
+        if ext in TABULAR_EXT or opaque or (n > a.reference_threshold
                                                        and not is_code):
             reference.append(describe_reference(p, rel))
         else:
@@ -451,8 +500,9 @@ def cmd_scope(a):
             tgt = f" -> {os.readlink(q)}" if q.is_symlink() else ""
             print(f"    {q.relative_to(repo)}{tgt}", file=sys.stderr)
     if rejected:
-        print(f"  note: {len(rejected)} file(s) match no known extension and are in no tier — "
-              "recorded under `unclassified` in the manifest, not reviewed:", file=sys.stderr)
+        print(f"  note: {len(rejected)} file(s) have an unknown type and are not tracked by git, "
+              "or could not be opened — recorded under `unclassified` in the manifest, not "
+              "reviewed:", file=sys.stderr)
         for q in sorted(rejected)[:8]:
             print(f"    {q.relative_to(repo)}", file=sys.stderr)
     print(f"scope: {len(review)} files to READ ({manifest['total_lines']} lines), "
@@ -1661,6 +1711,9 @@ def cmd_coverage(a):
             "tier": tier, "first_seen_run": run_id, "times_reviewed": 0,
             "reviewed_by": {}, "sha256_when_reviewed": {}, "findings_total": 0})
         e["tier"] = tier
+        # Model weights and images can be listed but never reviewed, so counting them as
+        # "never reviewed" put a permanent, unactionable entry at the top of every report.
+        e["opaque"] = meta.get("kind") == "opaque"
         e["sha256"] = meta.get("sha256")
         e["lines"] = meta.get("lines")
         touched = read_by.get(path, set()) | queried_by.get(path, set())
@@ -1700,13 +1753,16 @@ def cmd_coverage(a):
     write_atomic(cov_path, json.dumps(cov, indent=2))
 
     files = cov["files"]
-    never = [p for p, e in files.items() if not e.get("last_reviewed_run")]
+    never = [p for p, e in files.items()
+             if not e.get("last_reviewed_run") and not e.get("opaque")]
+    opaque = [p for p, e in files.items() if e.get("opaque")]
     stale = sorted((e.get("runs_since_reviewed") or 0, p) for p, e in files.items()
-                   if e.get("runs_since_reviewed"))
+                   if e.get("runs_since_reviewed") and not e.get("opaque"))
     print(f"coverage: {len(files)} files tracked over {len(cov['runs'])} run(s)"
           + (" [replay — counters unchanged]" if replay else "") + f" → {cov_path}")
     print(f"  reviewed this run: {sum(1 for e in files.values() if e.get('last_reviewed_run') == run_id)}"
-          f" · never reviewed: {len(never)}")
+          f" · never reviewed: {len(never)}"
+          + (f" · opaque, not reviewable: {len(opaque)}" if opaque else ""))
     if never:
         for p_ in sorted(never)[:8]:
             print(f"    NEVER REVIEWED  {p_}")
@@ -1958,6 +2014,100 @@ def cmd_store(a):
 
 # ---------------------------------------------------------------- audit (scope honesty)
 
+def git_toplevel(repo: Path) -> Path:
+    r = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=repo,
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        die(f"{repo} is not inside a git repository, so `residue` cannot compare the working "
+            "tree. Say in the handover that residue went unchecked this run.")
+    return Path(r.stdout.strip())
+
+
+def worktree_state(repo: Path):
+    """Every path `git status` reports under `repo`, ignored files included, as {path: code}.
+
+    Paths are relative to the repository's top level, which is how git prints them even when
+    `repo` is a subdirectory; `-- .` limits the report to that subdirectory.
+    """
+    top = git_toplevel(repo)
+    # Not `sh`: it strips the output, and the first entry's status code can begin with a space.
+    # Bytes, not text: with -z git prints names unescaped, and one untracked file whose name
+    # is not UTF-8 made this — the first command of a run — raise and abort the audit.
+    # `--untracked-files=normal` reports an untracked or ignored directory as one entry; `all`
+    # would list every file inside .venv/ and the data directories, on every run.
+    r = subprocess.run(["git", "status", "--porcelain=v1", "--ignored", "-z",
+                        "--untracked-files=normal", "--", "."], cwd=repo, capture_output=True)
+    if r.returncode != 0:
+        die(f"git status failed in {repo}: {os.fsdecode(r.stderr).strip()}")
+    out = os.fsdecode(r.stdout)
+    state, items = {}, out.split("\0")
+    i = 0
+    while i < len(items):
+        e = items[i]
+        i += 1
+        if len(e) < 4:
+            continue
+        code, path = e[:2], e[3:]
+        if code[0] in "RC":
+            i += 1          # a rename carries its source path as the next entry
+        # A file already modified before the run keeps the same code if a reviewer modifies
+        # it again, so a modified or untracked file is identified by its content as well.
+        # Ignored entries are not hashed: they are caches and data, often very large.
+        f = top / path
+        if code != "!!" and not path.endswith("/") and f.is_file():
+            try:
+                code = f"{code}:{sha256_of(f)[:16]}"
+            except OSError:
+                pass
+        state[path] = code
+    return state
+
+
+def cmd_residue(a):
+    """Snapshot the working tree before reviewers run; afterwards, name what they left behind.
+
+    Every reviewer is told to edit nothing, and the kit says it edits nothing. The first live
+    run still left a `.pytest_cache/` in the repository from a `pytest --collect-only`, and it
+    was only noticed because the orchestrator happened to look. Ignored files are included:
+    caches are exactly what a reviewer leaves, and `.gitignore` hides them from a plain status.
+    """
+    repo = Path(a.repo).resolve()
+    snap = Path(a.run_dir) / "tree-before.json"
+    if a.save:
+        if snap.exists() and not a.force:
+            print(f"residue: keeping the existing snapshot {snap} (this run is being resumed)")
+            return
+        write_atomic(snap, json.dumps(worktree_state(repo), indent=1))
+        print(f"residue: snapshot of the working tree → {snap}")
+        return
+    before = _load_json(snap)
+    if before is None:
+        die(f"no snapshot at {snap}: run `residue --save` before the reviewers, or say in the "
+            "handover that residue went unchecked this run")
+    summary_rel = str((repo / summary_name(repo)).relative_to(git_toplevel(repo)))
+    after = worktree_state(repo)
+    new = {p: c for p, c in after.items()
+           if before.get(p) != c and p.rstrip("/") != summary_rel}
+    gone = sorted(p for p in before if p not in after)
+    if not new and not gone:
+        print("residue: the working tree is as the reviewers found it")
+        return
+    print("RESIDUE: the working tree changed while the review ran "
+          "(paths relative to the repository's top level).")
+    for p, c in sorted(new.items()):
+        code, prev = c[:2], before.get(p)
+        if prev is None:
+            what = {"!!": "ignored file left behind", "??": "untracked file left behind"}.get(
+                code, f"status {code.strip()!r} (was clean)")
+        else:
+            what = f"changed during the run (status {code.strip()!r}, was {prev[:2].strip()!r})"
+        print(f"    {p}   {what}")
+    for p in gone:
+        print(f"    {p}   gone (was {before[p][:2].strip()!r})")
+    print("  Name these in the handover. Do not delete them yourself: the person decides.")
+    sys.exit(1)
+
+
 def cmd_audit(a):
     """Compare declared files_read against the harness-written access log.
 
@@ -2002,6 +2152,7 @@ def cmd_audit(a):
     declared = set(doc.get("scope", {}).get("files_read") or [])
     touched = set()
     agents_seen = set()
+    commands, truncated = [], []
 
     # The log is appended to forever, across every run of this repository. Without a floor on
     # the timestamp, a record written three weeks ago vouched for a file this run never
@@ -2048,6 +2199,10 @@ def cmd_audit(a):
             # A record with no agent id is unattributable, so it cannot support anyone's
             # claim. Previously it supported everyone's.
             continue
+        if rec.get("reads") and rec.get("cmd"):
+            commands.append((rec["cmd"], rec.get("cwd") or str(repo)))
+        if rec.get("truncated"):
+            truncated.append(rec.get("cmd") or rec.get("tool"))
         for p in rec.get("paths", []):
             q = (repo / p) if not p.startswith("/") else Path(p)
             try:
@@ -2066,6 +2221,32 @@ def cmd_audit(a):
     outside = sorted(q for q in declared
                      if q.startswith("/") and not str(Path(q)).startswith(str(repo)))
     unsupported = sorted(set(declared) - touched - set(outside))
+    # A file whose name appears in one of this agent's reading commands, though the hook could
+    # not resolve the command to it — a `$(...)`, an alias, a loop deeper than it unrolls. It is
+    # neither proven read nor proven unread, and reporting it as an UNSUPPORTED CLAIM is what
+    # made the first live run accuse every reviewer of reads its transcript shows it made.
+    # Only commands that ran a reader count, so a file named only in an `ls` or an `echo`
+    # stays UNSUPPORTED. The command must name THIS file: its path as seen from the command's
+    # cwd, or its name together with the directory it is in (`cd src/x && cat $(echo a.py)`).
+    # A bare stem matched any search word, and a bare basename let `cat docs/README.md`
+    # turn a fabricated claim to have read src/README.md into one that merely needed checking.
+    def mentions(cmd, s):
+        return re.search(r"(?<![\w.\-/])" + re.escape(s) + r"(?![\w.\-/])", cmd) is not None
+
+    def named_in(path):
+        full = (repo / path).resolve()
+        for cmd, cwd in commands:
+            here = os.path.relpath(full, cwd)
+            if mentions(cmd, here) or mentions(cmd, str(full)) or mentions(cmd, path):
+                return cmd
+            parent = os.path.relpath(full.parent, cwd)
+            if mentions(cmd, full.name) and parent != "." and (
+                    mentions(cmd, parent) or mentions(cmd, str(full.parent))):
+                return cmd
+        return None
+    unresolved = {p: named_in(p) for p in unsupported}
+    unresolved = {p: c for p, c in unresolved.items() if c}
+    unsupported = [p for p in unsupported if p not in unresolved]
     name = doc.get("reviewer", "?")
     checkable = set(declared) - set(outside)
     print(f"audit {name}: {len(checkable)} of {len(declared)} declared file(s) are checkable "
@@ -2075,11 +2256,27 @@ def cmd_audit(a):
     if outside:
         print(f"  note: {len(outside)} declared path(s) lie outside {repo} and cannot be "
               "checked against this log: " + ", ".join(outside[:4]), file=sys.stderr)
+    if unresolved:
+        print(f"  UNRESOLVED: {len(unresolved)} declared file(s) are named in a reading command "
+              "the hook could not resolve to a path. Neither proven read nor unread — check "
+              "the command before reporting either:")
+        for p, c in sorted(unresolved.items())[:20]:
+            one = " ".join(c.split())
+            print(f"    {p}\n      in: {one[:160]}{'…' if len(one) > 160 else ''}")
+    if truncated and (unsupported or unresolved):
+        print(f"  note: {len(truncated)} of this agent's commands matched more files than the hook "
+              "follows (500 per glob or loop, 2,000 per record, or its work limit), so a file "
+              "below may have been read by one of them:")
+        for c in truncated[:3]:
+            one = " ".join(str(c).split())
+            print(f"      {one[:160]}")
     if unsupported:
         print(f"  UNSUPPORTED CLAIM: {len(unsupported)} declared file(s) appear in no tool call:")
         for p in unsupported[:20]:
             print(f"    {p}")
         sys.exit(1)
+    if unresolved:
+        sys.exit(3)
     print("  every declared file appears in the access log")
 
 
@@ -2453,6 +2650,12 @@ def main():
     p.add_argument("--kit", action="store_true",
                    help="print where the review kit itself lives, as recorded at install")
     p.set_defaults(fn=cmd_store)
+
+    p = sub.add_parser("residue", help="snapshot the working tree, then report what a run left")
+    p.add_argument("--repo", required=True); p.add_argument("--run-dir", required=True)
+    p.add_argument("--save", action="store_true", help="take the snapshot (before reviewers)")
+    p.add_argument("--force", action="store_true", help="with --save, replace an existing one")
+    p.set_defaults(fn=cmd_residue)
 
     p = sub.add_parser("audit", help="check files_read against the harness access log")
     p.add_argument("--findings"); p.add_argument("--repo", required=True)

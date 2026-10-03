@@ -205,23 +205,31 @@ what gives you figures for *your* repository, and those do have a source.
   but `REVIEW-SUMMARY.md` is deliberately committed, so `grep -r`, `git show HEAD:<name>` and
   `git log -p` all serve a previous run's conclusions. Reviewers are told by name not to read
   it. That instruction is the control, and an instruction is weaker than a construction.
-- **`audit` has never run inside a live review.** Both halves are tested on fixtures — the hook
-  writes the log, and `audit` fails a claimed read that the log does not support — but the two
-  have never been joined by a real reviewer session. The hook must be in the settings file of
-  the directory the session started in, and must be there before the session starts; until that
-  holds, every reviewer's claim about what it read is taken on trust. `audit` refuses to run
-  without a log rather than reporting a pass it cannot support, so the failure mode is a missing
-  check, not a false one.
+- **`audit` reads commands, not the reads themselves.** Its first live run reported 70 of 164
+  declared reads as unsupported, and the transcripts showed every one had happened: the hook
+  resolved bare names against the repository root, so `cd src && cat -n train.py` and
+  `for f in …; do cat -n $f; done` logged nothing. It now follows `cd`, subshells, variables,
+  `for` loops, brace lists and simple `find`, credits only output that reached the reviewer,
+  and replaying that run's commands through it supports every declared read. A command
+  it still cannot follow — a `$(...)`, a shell function — is reported as UNRESOLVED with the
+  command attached, for a person to settle, rather than as a false accusation. The log also
+  proves only that a reading command was issued, not that the content was attended to.
 - **Fingerprints under-cluster.** Two reviewers citing the same defect at adjacent lines get
   different fingerprints, which is why every run produces ~100 proximity candidates for the
   reconciler to judge by hand, and why the miss rate above is an upper bound.
 - **The reconciler is a single point of judgement.** It is the one stage with no independent
   check on it. The injection test is the only instrument pointed at it so far.
-- **Scope is an extension allowlist.** A file whose suffix is unknown and whose name is not one
-  of a handful of recognised build files (`Makefile`, `Dockerfile`, …) enters no tier. It is
-  recorded under `unclassified` in the manifest rather than dropped silently, but nothing
-  reviews it.
-- **The bookkeeping has no test suite and no CI.** `bin/` is roughly 2,650 lines of Python,
+- **Unknown suffixes are placed only when git tracks them.** A tracked file whose suffix and
+  name the kit does not know is opaque if its first 8 KiB hold a NUL byte, and is placed by
+  length otherwise. An untracked one goes under `unclassified` and nothing reviews it — which
+  keeps an ignored tree of extensionless output out of every tier, and also means a new,
+  not-yet-added script with an odd suffix goes unread.
+- **`residue` sees only what git sees.** It compares `git status` before and after, ignored
+  files included, with untracked and ignored directories collapsed to one entry each. A file
+  created inside a directory that was already untracked or ignored — a `.pytest_cache/` left
+  by an earlier run, a new file in `.venv/` — does not show, and nor does an edit to an
+  existing ignored file, which is not hashed. Outside a git repository it does not run.
+- **The bookkeeping has no test suite and no CI.** `bin/` is roughly 3,650 lines of Python,
   and the section above argues that every failure this kit has had came from that half rather
   than from the judgement half — yet every regression in it has been caught by running a
   review, not by a check that runs on its own. The fixtures in this repository's history live
