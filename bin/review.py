@@ -597,9 +597,13 @@ def cmd_runs(a):
     findings were already on disk and paid for.
     """
     repo = Path(a.repo).resolve()
+    # Always the external store. This used to switch to an in-repository `.review/` whenever
+    # one existed — a leftover from an older version, which nothing else reads — and then
+    # reported "no runs yet" while the store held a run that could be resumed.
     runs_dir = store_path(repo) / "runs"
-    if (repo / ".review").exists():
-        runs_dir = repo / ".review" / "runs"
+    if (repo / ".review").is_dir():
+        print(f"note: {repo / '.review'} is left over from an older version of this kit and is "
+              "not used; runs live in the external store.", file=sys.stderr)
     if not runs_dir.is_dir():
         print(f"no runs yet for {repo}")
         return
@@ -1170,6 +1174,19 @@ REQUIRED_FINDING = ["id", "claim", "evidence", "severity", "confidence", "class"
                     "fix", "fix_certainty", "file"]
 
 
+def manifest_spelling(repo, p):
+    """A declared path as the manifest spells it — relative to the repository, normalised —
+    when it lies inside the repository; otherwise unchanged."""
+    if not repo or not isinstance(p, str):
+        return p
+    root = Path(repo)
+    q = Path(os.path.normpath(Path(p) if os.path.isabs(p) else root / p))
+    try:
+        return q.relative_to(root).as_posix()
+    except ValueError:
+        return p
+
+
 def validate_findings(doc, manifest=None, repo=None):
     v = []
     for k in REQUIRED_TOP:
@@ -1181,6 +1198,10 @@ def validate_findings(doc, manifest=None, repo=None):
         v.append("scope.files_read must be a LIST of paths, not a count "
                  "(a count cannot be checked against the manifest)")
         read = []
+    # One spelling per file, the manifest's: `./a.py` and `/abs/repo/a.py` are `a.py`. Raw
+    # strings made a declared `./a.py` a file read outside the manifest AND an unread
+    # in-scope file, a SCOPE GAP for a file that had been read. `audit` matches the same way.
+    read = [manifest_spelling(repo, r) for r in read]
     if manifest:
         if "files" not in manifest:
             v.append("manifest has no `files` key — it is not a scope manifest, or `scope` "
@@ -1219,7 +1240,7 @@ def validate_findings(doc, manifest=None, repo=None):
                 print(f"  note: {len(other)} file(s) read outside the manifest "
                       f"(not a violation): " + ", ".join(other[:4])
                       + ("…" if len(other) > 4 else ""), file=sys.stderr)
-        queried = set(scope.get("files_queried") or [])
+        queried = {manifest_spelling(repo, q) for q in scope.get("files_queried") or []}
         opq = {f["path"] for f in manifest.get("reference", []) if f.get("kind") == "opaque"}
         if queried & opq:
             v.append(f"{len(queried & opq)} opaque file(s) listed in files_queried: "
@@ -1690,17 +1711,19 @@ def cmd_coverage(a):
     for fp_ in sorted(run.glob("findings-*.json")):
         d = _load_json(fp_)
         rev = d.get("reviewer") or fp_.stem
+        # The manifest's spelling, as `validate` and `audit` use: a declared `./a.py` is a.py.
         for path in d.get("scope", {}).get("files_read") or []:
-            read_by.setdefault(path, set()).add(rev)
+            read_by.setdefault(manifest_spelling(man.get("repo"), path), set()).add(rev)
         for path in d.get("scope", {}).get("files_queried") or []:
-            queried_by.setdefault(path, set()).add(rev)
+            queried_by.setdefault(manifest_spelling(man.get("repo"), path), set()).add(rev)
 
     # findings per file, this run
     per_file = {}
     for fp_ in sorted(run.glob("findings-*.json")):
         for f in _load_json(fp_).get("findings", []):
             if f.get("file"):
-                per_file[f["file"]] = per_file.get(f["file"], 0) + 1
+                k = manifest_spelling(man.get("repo"), f["file"])
+                per_file[k] = per_file.get(k, 0) + 1
 
     now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     # Idempotent: merging the same run twice must not double-count it. Re-running a stage
@@ -2086,10 +2109,13 @@ def cmd_residue(a):
         write_atomic(snap, json.dumps(worktree_state(repo), indent=1))
         print(f"residue: snapshot of the working tree → {snap}")
         return
-    before = _load_json(snap)
-    if before is None:
+    # Existence, not content: an empty snapshot is a clean tree. `_load_json` returns {} for a
+    # missing file, so the check used to test for None, never fire, and report every untracked
+    # file in the repository as left behind by the reviewers.
+    if not snap.exists():
         die(f"no snapshot at {snap}: run `residue --save` before the reviewers, or say in the "
             "handover that residue went unchecked this run")
+    before = _load_json(snap)
     summary_rel = str((repo / summary_name(repo)).relative_to(git_toplevel(repo)))
     after = worktree_state(repo)
     new = {p: c for p, c in after.items()
@@ -2112,6 +2138,25 @@ def cmd_residue(a):
         print(f"    {p}   gone (was {before[p][:2].strip()!r})")
     print("  Name these in the handover. Do not delete them yourself: the person decides.")
     sys.exit(1)
+
+
+def declared_path(repo: Path, d: str) -> dict:
+    """A declared files_read entry as audit compares it: as written and resolved, and inside?"""
+    q = Path(d) if os.path.isabs(d) else repo / d
+    logical = Path(os.path.normpath(q))
+    try:
+        resolved = q.resolve()
+    except (OSError, RuntimeError):
+        resolved = logical
+
+    def within(p):
+        try:
+            p.relative_to(repo)
+            return True
+        except ValueError:
+            return False
+    return {"logical": logical, "resolved": resolved,
+            "inside": within(logical) or within(resolved)}
 
 
 def cmd_audit(a):
@@ -2222,23 +2267,31 @@ def cmd_audit(a):
         if rec.get("truncated"):
             truncated.append(rec.get("cmd") or rec.get("tool"))
         for p in rec.get("paths", []):
-            q = (repo / p) if not p.startswith("/") else Path(p)
+            q = Path(p) if os.path.isabs(p) else repo / p
             try:
-                touched.add(str(q.resolve().relative_to(repo)))
-            except (ValueError, OSError):
+                touched.add(q.resolve())
+            except (OSError, RuntimeError):
                 pass
     if not a.agent and len(agents_seen) > 1:
         die(f"this access log holds {len(agents_seen)} distinct agents and no --agent was "
             "given, so every agent's reads would vouch for this one's claims. Pass --agent "
             "with the subagent id for this findings file. Agents in the log: "
             + ", ".join(sorted(agents_seen)[:6]))
+    # Declared and logged paths are compared as resolved absolute paths, so every spelling of
+    # one file matches: `a.py`, `./a.py`, `/abs/repo/a.py`, and `data/d.py` read through a
+    # symlinked `data/`. Comparing repo-relative strings reported a declared `./a.py` or
+    # absolute path as an UNSUPPORTED CLAIM although it had been read, and could never credit
+    # a file under a symlinked directory at all.
+    canon = {d: declared_path(repo, d) for d in declared}
     # A path the reviewer read from outside the repository — the kit's own FINDINGS.md, for
-    # instance — cannot be resolved against the repo and so appeared in `declared` but never
-    # in `touched`, which reported an honest reviewer as making an UNSUPPORTED CLAIM.
-    # `validate` calls reading outside the manifest "not a violation"; the two must agree.
-    outside = sorted(q for q in declared
-                     if q.startswith("/") and not str(Path(q)).startswith(str(repo)))
-    unsupported = sorted(set(declared) - touched - set(outside))
+    # instance — cannot be checked against this repository's log. `validate` calls reading
+    # outside the manifest "not a violation"; the two must agree. Inside means inside by path
+    # components, as written or resolved: `../kit/x.md` is outside, and `/x/r2/z.md` is not
+    # inside `/x/r` merely because the strings share a prefix.
+    outside = sorted(d for d, c in canon.items() if not c["inside"])
+    checkable = {d for d, c in canon.items() if c["inside"]}
+    seen = {d for d in checkable if canon[d]["resolved"] in touched}
+    unsupported = sorted(checkable - seen)
     # A file whose name appears in one of this agent's reading commands, though the hook could
     # not resolve the command to it — a `$(...)`, an alias, a loop deeper than it unrolls. It is
     # neither proven read nor proven unread, and reporting it as an UNSUPPORTED CLAIM is what
@@ -2252,7 +2305,7 @@ def cmd_audit(a):
         return re.search(r"(?<![\w.\-/])" + re.escape(s) + r"(?![\w.\-/])", cmd) is not None
 
     def named_in(path):
-        full = (repo / path).resolve()
+        full = canon[path]["logical"]
         for cmd, cwd in commands:
             here = os.path.relpath(full, cwd)
             if mentions(cmd, here) or mentions(cmd, str(full)) or mentions(cmd, path):
@@ -2266,9 +2319,8 @@ def cmd_audit(a):
     unresolved = {p: c for p, c in unresolved.items() if c}
     unsupported = [p for p in unsupported if p not in unresolved]
     name = doc.get("reviewer", "?")
-    checkable = set(declared) - set(outside)
     print(f"audit {name}: {len(checkable)} of {len(declared)} declared file(s) are checkable "
-          f"against this log; {len(touched & checkable)} of those appear in it")
+          f"against this log; {len(seen)} of those appear in it")
     print(f"  records considered: those at or after {floor.isoformat()}"
           + (f"; {stale} earlier or undated record(s) ignored" if stale else "")
           + (f"; {unattributed} record(s) with no agent id ignored" if unattributed else ""))
