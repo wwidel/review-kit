@@ -1,8 +1,47 @@
 # Review kit
 
+## WARNING
+
+**A full audit is expensive, and its cost can only be guessed very roughly.** The best guess
+so far:
+
+```
+tokens ≈ 700k + 140 × reviewable lines
+```
+
+**This is a very rough approximation, not a price.** It is fitted to five audits, and one of
+them landed a third away from it. What a repository costs depends on more than its size, and
+a repository unlike these five may land further off, in either direction. Budget for more than
+it says.
+
+The 700k is roughly the fixed cost of four reviewer legs and the reconciler. The per-line term
+is the source being read, re-read and verified. A single audit can use up a weekly usage limit,
+and one already has.
+
+| repository | reviewable lines | actual total | formula |
+|---|---:|---:|---:|
+| Solution B | 1,397 | ~0.90M | 0.90M |
+| Solution C | 2,921 | ~1.04M | 1.11M |
+| Solution D | 3,719 | ~1.13M | 1.22M |
+| Solution E | 4,760 | ~1.04M | 1.37M |
+| a private repository | 20,259 | ~3.5M | 3.54M |
+
+`/repo-audit` prints the reviewable line count and stops for your go-ahead before it spawns any
+reviewer. Apply the formula to that count. Ignore the token figure printed next to it, which
+runs low on large repositories: at 20,000 lines it says about 1.8M. To spend less, use
+`--since <ref>` or run one single-purpose skill (see [Run](#run)).
+
+**Tested on Linux and WSL only.** macOS has not been tried. `review.py machine` reads memory
+from `/proc/meminfo`, so on a Mac it reports no memory figure and the compute-budget check has
+less to go on. Native Windows does not work: `machine` calls `os.statvfs`, which Windows lacks.
+
+## What it is
+
 A review system for Python repositories built around data analysis and machine learning. Four
 independent reviewers — one of them blinded to the documentation — then a reconciler that does
-not trust any of them.
+not trust any of them. For what it finds in practice, see
+[KAGGLE-RESULTS.md](KAGGLE-RESULTS.md): 211 confirmed defects in four prize-winning Kaggle
+solutions.
 
 **Everything here is invoked by a person.** Nothing schedules itself, nothing hooks into git,
 and no agent decides on its own that a review is due. Agents are unreliable at doing things
@@ -14,7 +53,7 @@ so the decision to spend five agents on a review stays with whoever is paying fo
 Clone the kit somewhere, then point it at a repository:
 
 ```bash
-git clone <review-kit> ~/tools/review-kit
+git clone git@github.com:wwidel/review-kit.git ~/tools/review-kit
 python3 ~/tools/review-kit/bin/install.py --repo ~/code/some-project
 ```
 
@@ -80,6 +119,7 @@ overwritten by an install.
 |---|---|
 | `README.md` | this — install, run, the commands |
 | [`DESIGN.md`](DESIGN.md) | how it works, why, what has been measured, known limits |
+| [`KAGGLE-RESULTS.md`](KAGGLE-RESULTS.md) | what it found in four prize-winning Kaggle solutions |
 | [`PRACTICES.md`](PRACTICES.md) | the rule vocabulary findings cite, and an optional default standard |
 | [`FINDINGS.md`](FINDINGS.md) | the JSON contract every reviewer emits |
 | `REVIEW-RULES.template.md` | copied into your repo by `--with-rules`; yours to edit |
@@ -205,8 +245,8 @@ compute budget measured before anything runs, so heavy work is flagged rather th
 and a reconciler that re-runs, re-reads and re-derives instead of summarising.
 
 DESIGN.md also carries what has been measured: ten planted false findings, all ten refuted; a
-repeat run putting an upper bound on the miss rate; and the cost, which tracks the protocol
-rather than the repository at roughly 880k–970k tokens per audit.
+repeat run putting an upper bound on the miss rate; and the cost, roughly 700k tokens plus 140
+per reviewable line (see [WARNING](#warning)).
 
 ## Practices — adopting them, or not
 
@@ -296,6 +336,7 @@ Four rules do most of the work in this repo class:
 review-kit/
   README.md                         this — install, run, the commands
   DESIGN.md                         how it works, why, what has been measured, known limits
+  KAGGLE-RESULTS.md                 what it found in four prize-winning Kaggle solutions
   PRACTICES.md                      portable rules, with stable IDs reviewers cite
   FINDINGS.md                       the JSON contract every reviewer emits
   CLAUDE.md.snippet                 working rules to paste into a project CLAUDE.md

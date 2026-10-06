@@ -166,17 +166,22 @@ against it. It is a bookmark, not a timer: nothing reads its age and decides to 
 
 ### Cost
 
-Roughly **880k–970k tokens for a full audit** of a repository of a few thousand lines, with a
-floor near 145k per reviewer. Cost tracks the *protocol* far more than the repository at that
-size: a 1,400-line repo cost 82% of what a 3,600-line one did. Trimming the preamble will not
-rescue this — the preamble is ~18k of that 145k.
+A full audit costs roughly **700k tokens plus 140 per reviewable line**. That fits five
+completed audits, from 1,397 to 20,259 lines and from ~0.9M to ~3.5M tokens in actual total
+cost. It is a very rough approximation: one of the five landed a third away from it. The
+README's WARNING has the table. At a few thousand lines the fixed protocol cost dominates: a 1,400-line repository cost 80% of what a
+3,700-line one did. Trimming the preamble will not rescue this, because the preamble is ~18k
+of a reviewer's ~145k floor.
 
-The protocol stops dominating once the repository is large. A 27,398-line repository estimates
-at **1.85M**, because the source itself is then ~255k per reviewer against that 145k floor. So
-`review.py estimate` runs in Stage 0 and the orchestrator puts the figure in front of the
-person before spawning anything: the first attempt on that repository exhausted a weekly limit
-with four reviewers running concurrently, and all four died before writing a findings file —
-full cost, no artefact.
+Past that size the repository takes over. The 20,259-line audit cost ~3.5M, about twice what
+`review.py estimate` would have priced it at. `estimate` charges each reviewer its floor plus
+one read of the source, and on a large repository the source is re-read and re-verified many
+times over. Its line count is right; its token figure runs low above a few thousand lines.
+
+The figure goes in front of the person before anything is spawned, which is why `estimate`
+runs in Stage 0. The first attempt on a 27,398-line repository, which `estimate` put at 1.85M
+and the formula puts nearer 4.5M, exhausted a weekly limit with four reviewers running
+concurrently. All four died before writing a findings file: full cost, no artefact.
 
 That is also why reviewers are spawned **one at a time**. Sequential execution gives up
 wall-clock time and buys partial results: a limit then costs the legs that had not started,
@@ -186,10 +191,11 @@ rather than all of them, and the run resumes by skipping whatever already valida
 
 ## Where the numbers on this page came from
 
-Every figure above was measured once, by hand, from the transcripts of the development runs on
-three Kaggle repositories — token totals read off the runs, the miss rate counted from two
-consecutive reviews of one repository, the refutation rate from a controlled injection of ten
-fabricated findings. **None of them has a script in this repository that reproduces it**, and
+Every figure above was measured once, by hand. The miss rate and refutation rate come from
+the transcripts of the development runs on three Kaggle repositories: two consecutive reviews
+of one repository, and a controlled injection of ten fabricated findings. The cost formula
+comes from the actual token totals of five completed audits: four public Kaggle solutions and
+one private repository, run on more than one machine. **None of them has a script in this repository that reproduces it**, and
 the runs themselves were not kept. They are recorded here because a rough, honestly-labelled
 figure is more useful than silence about cost, and they should be read as one-off observations
 rather than as measurements you can check.
