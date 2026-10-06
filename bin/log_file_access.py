@@ -16,7 +16,7 @@ let a read from weeks ago vouch for a file this run never opened.
 
 Never fails the tool call — a broken hook must not break the session.
 """
-import glob, itertools, json, os, re, shlex, sys, datetime
+import fnmatch, json, os, re, shlex, sys, time, datetime
 from pathlib import Path
 
 # A path-like token inside an inline script or heredoc body. The extension may run to 12
@@ -61,12 +61,49 @@ BRACE = re.compile(r"(?<!\$)\{([^{}$]*,[^{}$]*)\}")
 
 # Work the parser may do for one command. The hook runs on every tool call; a nested loop over
 # a large glob once took minutes, the harness killed the hook, and nothing was logged at all.
+# Glob expansion is charged per directory listed, not only per match: a deep pattern that
+# matches nothing (`/usr/*/*/*/*/*/zzz.py`) listed thousands of directories for free and
+# took seconds. The deadline is the backstop for any slow path nobody has thought of.
 BUDGET = 5000
+DEADLINE_S = 0.5
 MAX_PATHS = 2000
+# Commands that close a compound block, and the words that open one: a redirect or pipe
+# after `done`, `fi` or `esac` applies to every command inside the block.
+CLOSERS = {"done": LOOPS, "fi": {"if"}, "esac": {"case"}}
+LEADERS = {"do", "then", "else", "!", "{", "time"}
 
 
 class OutOfBudget(Exception):
     pass
+
+
+def spend(state, n=1):
+    """Charge the parse for some work; stop it when the budget or the deadline runs out."""
+    state["budget"][0] -= n
+    if state["budget"][0] <= 0 or time.monotonic() > state.get("deadline", float("inf")):
+        raise OutOfBudget
+
+
+def strip_comment(line: str) -> str:
+    """A shell line without its comment. `#` starts one only at the start of a word and
+    outside quotes, so `cat a.py # b.py` reads a.py alone and `echo '#'` is untouched."""
+    quote, prev, i = None, " ", 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "\\" and quote != "'":
+            prev = line[i + 1] if i + 1 < len(line) else ""
+            i += 2
+            continue
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#" and (prev.isspace() or prev in ";&|()"):
+            return line[:i]
+        prev = ch
+        i += 1
+    return line
 
 
 def looks_like_path(s: str, root: str) -> bool:
@@ -154,6 +191,7 @@ def simple_commands(text: str):
     inside a subshell does not outlive it; `{ ...; }` and `( ... )` are groups, and a redirect
     or pipe after one applies to every command inside it.
     """
+    text = "\n".join(strip_comment(x) for x in text.split("\n"))
     lex = shlex.shlex(text.replace("\n", " ; "), posix=True, punctuation_chars=True)
     lex.whitespace_split = True
     lex.commenters = ""
@@ -183,8 +221,13 @@ def simple_commands(text: str):
             pending = None
             if op in ("<", "<&") and fd in (None, "0"):
                 cur["inputs"].append(tok)
-            elif (op in (">", ">>", ">|") and fd in (None, "1")
-                  and tok not in ("/dev/stdout", "/dev/tty")) or op in ("&>", "&>>"):
+            elif ((op in (">", ">>", ">|") and fd in (None, "1")
+                   and tok not in ("/dev/stdout", "/dev/stderr", "/dev/tty"))
+                  or op in ("&>", "&>>")
+                  # `>& file` sends stdout and stderr to the file; `>&2` only moves stdout
+                  # to stderr, which the reviewer still sees.
+                  or (op == ">&" and fd in (None, "1") and not tok.isdigit()
+                      and tok not in ("-", "/dev/stdout", "/dev/stderr", "/dev/tty"))):
                 if not cur["words"] and not cur["inputs"] and out \
                         and len(out) - 1 in groups:
                     # `{ cat a; cat b; } > /dev/null` hides the whole group.
@@ -242,7 +285,36 @@ def simple_commands(text: str):
                     x["hidden"] = True
         if isinstance(c, dict) and c["pipe"] and sink_hides(k):
             c["hidden"] = True
+        if isinstance(c, dict) and c["hidden"] and len(c["words"]) == 1 \
+                and c["words"][0] in CLOSERS:
+            # `for …; do cat $f; done | wc -l` and `if …; fi > /dev/null` hide the whole
+            # block, as `{ …; }` does; only the closing word used to be hidden.
+            start = block_start(out, k)
+            if start is not None:
+                for x in out[start:k]:
+                    if isinstance(x, dict):
+                        x["hidden"] = True
     return out
+
+
+def block_start(out, k):
+    """Index of the command that opens the block `out[k]` (a lone `done`/`fi`/`esac`) closes."""
+    closer = out[k]["words"][0]
+    depth = 0
+    for i in range(k - 1, -1, -1):
+        x = out[i]
+        # A nested opener follows a keyword in the same simple command: `do for g in …`.
+        words = [w for w in x["words"] if w not in LEADERS] if isinstance(x, dict) else []
+        if not words:
+            continue
+        w = words[0]
+        if w == closer:
+            depth += 1
+        elif w in CLOSERS[closer]:
+            if depth == 0:
+                return i
+            depth -= 1
+    return None
 
 
 def substitute(word, env):
@@ -284,29 +356,51 @@ def resolve(word, cwd):
 
 
 def expand_glob(word, cwd, state):
+    """The files a shell glob names, sorted as the shell would, at most 500 of them.
+
+    Expanded one path component at a time, with every directory listing charged to the
+    parse. `glob.iglob` charged only for what it matched, so a deep pattern that matched
+    nothing could list every directory under `/usr` before returning, for free.
+    """
     pat = word if word.startswith("/") else os.path.join(cwd, word)
-    hits, budget, n = [], state["budget"], 0
-    for g in itertools.islice(glob.iglob(pat), 501):
-        n += 1
-        if n > 500:
+    parts = Path(pat).parts
+    cands = [parts[0]]
+    for comp in parts[1:]:
+        nxt = []
+        for c in cands:
+            if not any(ch in comp for ch in "*?["):
+                spend(state)
+                q = os.path.join(c, comp)
+                if os.path.lexists(q):
+                    nxt.append(q)
+                continue
+            try:
+                names = os.listdir(c)
+            except OSError:
+                continue
+            spend(state, 1 + len(names) // 200)
+            nxt += [os.path.join(c, n) for n in sorted(names)
+                    if (comp.startswith(".") or not n.startswith("."))
+                    and fnmatch.fnmatchcase(n, comp)]
+        cands = nxt
+    hits = []
+    for g in cands:
+        if len(hits) == 500:
             # Recorded, so `audit` knows this parse did not see every file the glob matched.
             state["truncated"] = True
             break
-        budget[0] -= 1
-        if budget[0] <= 0:
-            raise OutOfBudget
+        spend(state)
         if os.path.isfile(g):
             hits.append(str(Path(g).resolve()))
     return hits
 
 
-def find_matches(args, cwd, budget):
+def find_matches(args, cwd, state):
     """The files `find DIR... [-type f] [-name P] [-maxdepth N]` would print, or None.
 
     Only that predicate subset is emulated; anything else returns None and the read is left
     for `audit` to report as unresolved, rather than guessed at.
     """
-    import fnmatch
     dirs, i, name, iname, depth = [], 0, None, None, None
     while i < len(args) and not args[i].startswith("-"):
         dirs.append(args[i])
@@ -337,14 +431,13 @@ def find_matches(args, cwd, budget):
     for d in dirs or ["."]:
         base = Path(d) if d.startswith("/") else Path(cwd) / d
         for root, sub, files in os.walk(base):
+            spend(state)
             rel_depth = len(Path(root).relative_to(base).parts)
             if depth is not None and rel_depth >= depth:
                 sub[:] = []
             sub[:] = [s for s in sub if s not in (".git", "node_modules", ".venv", "venv")]
             for f in files:
-                budget[0] -= 1
-                if budget[0] <= 0:
-                    raise OutOfBudget
+                spend(state)
                 if depth is not None and rel_depth + 1 > depth:
                     continue
                 if name and not fnmatch.fnmatchcase(f, name):
@@ -358,14 +451,20 @@ def find_matches(args, cwd, budget):
 def quiet(name, args):
     """True if this invocation prints no file content: `grep -l`, `grep -q`, `cmp -s`, `head -c0`."""
     if name in ("grep", "egrep", "fgrep", "rg"):
+        # For rg, -L is --follow (symlinks), not --files-without-match as it is for grep.
+        letters = set("qlc") if name == "rg" else set("qlLc")
         for a in args:
             if a in ("--quiet", "--silent", "--count", "--files-with-matches",
                      "--files-without-match"):
                 return True
-            if a.startswith("-") and not a.startswith("--") and set(a[1:]) & set("qlLc") \
+            if a.startswith("-") and not a.startswith("--") and set(a[1:]) & letters \
                     and not re.search(r"[0-9]", a):
                 return True
     if name == "cmp" and any(a in ("-s", "--silent", "--quiet") for a in args):
+        return True
+    if name == "sort" and any(a == "-o" or a.startswith("--output") or
+                              (a.startswith("-o") and len(a) > 2) for a in args):
+        # `sort -o out a.py` writes to a file, exactly like `sort a.py > out`.
         return True
     if name in ("head", "tail"):
         joined = " ".join(args)
@@ -425,6 +524,9 @@ def git_read(args, cwd, out, state, hidden):
     """
     k = 0
     while k < len(args) and args[k].startswith("-"):
+        if args[k] == "-C" and k + 1 < len(args):
+            # `git -C src show …` runs as if from src: names resolve there.
+            cwd = os.path.join(cwd, args[k + 1])
         k += 2 if args[k] in ("-C", "-c") else 1
     if k >= len(args):
         return
@@ -458,7 +560,6 @@ def walk(cmds, cwd, env, out, state, depth=0):
     the reviewer is credited.
     """
     stack, i, prev_find = [], 0, None
-    budget = state["budget"]
     while i < len(cmds):
         c = cmds[i]
         i += 1
@@ -470,9 +571,7 @@ def walk(cmds, cwd, env, out, state, depth=0):
             continue
         if c in ("{", "}"):
             continue               # a brace group runs in the current shell: cd persists
-        budget[0] -= 1
-        if budget[0] <= 0:
-            raise OutOfBudget
+        spend(state)
         found, prev_find = prev_find, None
         words = [substitute(w, env) for w in c["words"]]
         while words and words[0] in KEYWORDS:
@@ -503,6 +602,10 @@ def walk(cmds, cwd, env, out, state, depth=0):
             for item in items[:500]:
                 walk(body, cwd, {**env, var: item}, out, state, depth + 1)
             continue
+        if c["inputs"] and words and words[0] in CLOSERS:
+            # `while read l; do echo $l; done < a.py` may print the file or nothing; which,
+            # only running it would tell. A reading command, so audit leaves it to a person.
+            state["reads"] = True
         if words and words[0] == "done":
             words = words[1:]
         while words and re.fullmatch(r"\w+=.*", words[0]):
@@ -510,15 +613,18 @@ def walk(cmds, cwd, env, out, state, depth=0):
             if len(words) == 1:
                 env[name] = value
             words = words[1:]
-        if not c["hidden"]:
-            for r in c["inputs"]:
-                hit = resolve(substitute(r, env), cwd)
-                if hit:
-                    out.add(hit)
         if not words:
             continue
         name = os.path.basename(words[0])
         args = words[1:]
+        # `< file` is shown only to a command that passes what it reads on: `cat < a.py`
+        # shows a.py, `wc -l < a.py` shows a number, and `while read l; do …; done < a.py`
+        # shows whatever the loop prints, which may be nothing. All three used to credit it.
+        if c["inputs"] and not c["hidden"] and name in PASS_CMDS and not quiet(name, args):
+            for r in c["inputs"]:
+                hit = resolve(substitute(r, env), cwd)
+                if hit:
+                    out.add(hit)
         if name in ("cd", "pushd"):
             target = args[0] if args else os.path.expanduser("~")
             if target != "-":
@@ -533,11 +639,11 @@ def walk(cmds, cwd, env, out, state, depth=0):
                 if inner in READ_CMDS:
                     state["reads"] = True
                 if inner in DUMP_CMDS and not c["hidden"]:
-                    hits = find_matches(args[:k], cwd, budget)
+                    hits = find_matches(args[:k], cwd, state)
                     if hits:
                         out.update(hits)
             elif c["pipe"]:
-                prev_find = find_matches(args, cwd, budget)
+                prev_find = find_matches(args, cwd, state)
             continue
         if found is not None and c["pipe"] and name in ("sort", "uniq", "tr", "tee"):
             prev_find = found      # `find … | sort | xargs cat`: the list passes through intact
@@ -566,7 +672,8 @@ def walk(cmds, cwd, env, out, state, depth=0):
 
 def bash_paths(cmd: str, cwd: str):
     """(files a Bash command showed the reviewer, whether it ran a reading command). Never raises."""
-    out, state = set(), {"budget": [BUDGET], "reads": False}
+    out, state = set(), {"budget": [BUDGET], "reads": False,
+                         "deadline": time.monotonic() + DEADLINE_S}
     try:
         text, bodies = strip_heredocs(cmd)
         if bodies:

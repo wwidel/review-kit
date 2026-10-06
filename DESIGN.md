@@ -220,6 +220,15 @@ what gives you figures for *your* repository, and those do have a source.
   it still cannot follow — a `$(...)`, a shell function — is reported as UNRESOLVED with the
   command attached, for a person to settle, rather than as a false accusation. The log also
   proves only that a reading command was issued, not that the content was attended to.
+- **`audit` catches careless over-claiming, not a reviewer set on deceiving it.** The hook
+  reads the command, not its output, so some commands that show little or none of a file
+  still credit it: `grep` with no match, `python3 a.py` (output, not source), `diff` of
+  identical files, `cmp`, `tail` past the end, `| sed d`, `sed -n 0p`, `awk 'NR==0'`, commands
+  that never run (`false && cat`, `if false; then cat …`), a path in a `python3 -c` comment,
+  and partial reads (`head -n1`, `sed -n 1p`, `cut -c1`). A path merely mentioned in a reading
+  command (`echo src/x.py; cat a.py`) turns a false claim about it into UNRESOLVED rather than
+  UNSUPPORTED. A static parser cannot close these; `tests/test_hook_parser.py` pins each one, so
+  a change to any of them is deliberate.
 - **Fingerprints under-cluster.** Two reviewers citing the same defect at adjacent lines get
   different fingerprints, which is why every run produces ~100 proximity candidates for the
   reconciler to judge by hand, and why the miss rate above is an upper bound.

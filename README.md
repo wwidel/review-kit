@@ -422,8 +422,12 @@ count them as reads, and nor does it count a record with no agent id. For a Bash
 follows `cd` (scoped to its subshell), simple `VAR=value` assignments, `for` loops, brace lists
 and a plain `find … -exec cat` or `find … | xargs cat`, and resolves each name against the
 directory the shell would be in, so `cd src && for f in a b; do cat -n $f.py; done` logs both
-files. It credits a file only when its content came back: not `wc`, `ls` or `echo`, not `grep
--l` or `grep -q`, and not a reader whose output went to a file or into `| wc`. It also stores
+files. It credits a file only to a reading command whose output reaches the reviewer: not `wc`,
+`ls` or `echo`, not `grep -l` or `grep -q`, and not a reader whose output went to a file, into
+`| wc`, or out of a whole loop or `if` block redirected away. It cannot tell whether the command
+printed anything: `grep` with no match, `false && cat`, `python3 a.py` and partial reads such as
+`head -n1` still count. So `audit` catches careless over-claiming, not a reviewer set on
+deceiving it; DESIGN.md lists the cases. It also stores
 the raw command, which is what lets `audit` tell a read it could not follow from a file no
 command named. Without the hook, `audit` refuses to run rather than reporting a pass it cannot
 support — and it ignores records older than the run it is checking, so a read from an earlier
