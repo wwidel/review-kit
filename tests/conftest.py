@@ -111,3 +111,57 @@ def audit_case(tmp_path, repo, declared, recs, agent=None, extra=()):
     if agent:
         args += ["--agent", agent]
     return run("review.py", *args, cwd=repo)
+
+
+# ---------------------------------------------------------------- bookkeeping fixtures
+
+def finding(fid, file, line, claim="something is wrong here", severity="major"):
+    """A finding that satisfies the contract in FINDINGS.md."""
+    return {"id": fid, "claim": claim, "file": file, "line": line,
+            "evidence": {"kind": "quote", "quote": "x"}, "severity": severity,
+            "confidence": "likely", "class": "defect", "fix": "change it",
+            "fix_certainty": "judgment"}
+
+
+def make_run(root, run_id, repo, read=None, findings=None, mode="full", files=None):
+    """A run directory with a manifest over every tracked file and fingerprinted findings.
+
+    `read` maps a reviewer leg to the files it declares read; `findings` maps a leg to its
+    findings. Fingerprints are stamped by the real `review.py fingerprint`.
+    """
+    review = load("review")
+    d = root / run_id
+    d.mkdir(parents=True)
+    tracked = files if files is not None else git(repo, "ls-files").stdout.split()
+    manifest = {"repo": str(repo), "generated": now_iso(-60), "mode": mode, "reference": [],
+                "files": [{"path": p, "sha256": review.sha256_of(repo / p),
+                           "lines": len((repo / p).read_text().splitlines())} for p in tracked]}
+    (d / "manifest.json").write_text(json.dumps(manifest))
+    for leg in sorted(set(read or {}) | set(findings or {})):
+        doc = {"reviewer": leg, "machine": {}, "denominators": {},
+               "scope": {"files_read": (read or {}).get(leg, [])},
+               "findings": (findings or {}).get(leg, [])}
+        p = d / f"findings-{leg}.json"
+        p.write_text(json.dumps(doc))
+        r = run("review.py", "fingerprint", "--findings", p, "--manifest", d / "manifest.json")
+        assert r.returncode == 0, r.stderr
+    return d
+
+
+def fingerprints(run_dir, leg):
+    return [f["fingerprint"] for f in
+            json.loads((run_dir / f"findings-{leg}.json").read_text())["findings"]]
+
+
+def item(fp, where, disposition="open", severity="major", corroborated_by=("code",)):
+    return {"fingerprint": fp, "disposition": disposition, "severity": severity,
+            "class": "defect", "title": f"defect at {where}", "where": where,
+            "defect": "it is wrong", "fix": "change it",
+            "corroborated_by": list(corroborated_by)}
+
+
+def write_reconciliation(run_dir, items, run_id=None):
+    p = run_dir / "reconciliation.json"
+    p.write_text(json.dumps({"run_id": run_id or run_dir.name, "date": "2026-10-06",
+                             "run_dir": str(run_dir), "machine": {}, "items": items}))
+    return p

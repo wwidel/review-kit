@@ -357,10 +357,14 @@ Each item in `items`:
  "verified_by": "the command or measurement that settled it",
  "blast_radius": "what is already wrong", "fix": "the concrete change",
  "fix_cost": "one line if the fix invalidates artefacts or needs a retrain",
- "not_applied_because": "…", "corroborated_by": ["review-code", "review-analysis"],
+ "not_applied_because": "…", "corroborated_by": ["code", "analysis"],
  "recurring_since": "<earlier run id, or omitted>",
  "why_not_run": "deferred only", "command": "deferred only"}
 ```
+
+`corroborated_by` names reviewers exactly as their findings files do: `fresh-eyes`, `code`,
+`analysis`, `docs`. `carryover`, `summarize` and `ledger` all refuse a reconciliation with an
+unknown disposition, severity, class or reviewer name, and list every problem at once.
 
 `disposition: dropped` is how a refuted finding is recorded — it stays in the ledger and never
 reaches the summary.
@@ -417,7 +421,9 @@ which is itself worth reading: it means the reconciliation lost track of who fil
 
 `rate_verifiable` is confirmed / (confirmed + refuted), or `null` when that denominator is
 zero. Re-running `ledger` on a run already in the file appends nothing and says so, so the
-denominators cannot be doubled by replaying Stage 5.
+denominators cannot be doubled by replaying Stage 5. `carryover` is replay-safe too: re-running
+it for the most recent run starts again from the record as it was before that run, and it
+refuses to replay an older one.
 
 Then update `$STORE/last_review.json` with the current commit and date, so the next run knows
 where to start.

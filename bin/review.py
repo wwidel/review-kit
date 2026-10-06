@@ -1433,6 +1433,11 @@ def cmd_fingerprint(a):
     doc = read_json(p, "findings file")
     weak = 0
     for f in doc.get("findings", []):
+        if f.get("file"):
+            # One spelling per file from here on, the manifest's. The fingerprint hashes the
+            # path, so `./a.py` and `a.py` used to give one defect two identities, and every
+            # later stage (cluster, carryover, summarize) compared the raw strings.
+            f["file"] = manifest_spelling(str(repo), f["file"])
         fp, basis, anchor, anchor_line = finding_fingerprint(f, repo)
         f["fingerprint"] = fp
         f["fingerprint_basis"] = basis
@@ -1728,13 +1733,26 @@ def cmd_coverage(a):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     # Idempotent: merging the same run twice must not double-count it. Re-running a stage
     # after fixing something downstream is normal, and a counter that drifts on replay makes
-    # every rate computed from it wrong.
+    # every rate computed from it wrong. The counters are therefore derived from per-run
+    # records, and a replay replaces its run's record. They used to be frozen on replay
+    # instead, so a reviewer leg added when a run was resumed updated `reviewed_by` and left
+    # `times_reviewed` and `findings_total` at what the first pass had counted.
     replay = run_id in cov["runs"]
+    if "legacy_runs" not in cov and any("reviewed_runs" not in e for e in cov["files"].values()):
+        # A record written before per-run counts: its totals already include these runs,
+        # which therefore keep the old rule and are never re-counted.
+        cov["legacy_runs"] = list(cov["runs"])
+    legacy_run = run_id in cov.get("legacy_runs", [])
     for path, meta in list(review_tier.items()) + list(ref_tier.items()):
         tier = "review" if path in review_tier else "reference"
         e = cov["files"].setdefault(path, {
             "tier": tier, "first_seen_run": run_id, "times_reviewed": 0,
-            "reviewed_by": {}, "sha256_when_reviewed": {}, "findings_total": 0})
+            "reviewed_by": {}, "sha256_when_reviewed": {}, "findings_total": 0,
+            "reviewed_runs": [], "findings_by_run": {}})
+        if "reviewed_runs" not in e:
+            e["legacy_times_reviewed"] = e.get("times_reviewed", 0)
+            e["legacy_findings_total"] = e.get("findings_total", 0)
+            e["reviewed_runs"], e["findings_by_run"] = [], {}
         e["tier"] = tier
         # Model weights and images can be listed but never reviewed, so counting them as
         # "never reviewed" put a permanent, unactionable entry at the top of every report.
@@ -1742,9 +1760,16 @@ def cmd_coverage(a):
         e["sha256"] = meta.get("sha256")
         e["lines"] = meta.get("lines")
         touched = read_by.get(path, set()) | queried_by.get(path, set())
+        if not legacy_run:
+            runs_ = set(e["reviewed_runs"]) - {run_id}
+            e["reviewed_runs"] = sorted(runs_ | ({run_id} if touched else set()))
+            e["findings_by_run"].pop(run_id, None)
+            if per_file.get(path):
+                e["findings_by_run"][run_id] = per_file[path]
+        e["times_reviewed"] = e.get("legacy_times_reviewed", 0) + len(e["reviewed_runs"])
+        e["findings_total"] = (e.get("legacy_findings_total", 0)
+                               + sum(e["findings_by_run"].values()))
         if touched:
-            if not replay:
-                e["times_reviewed"] += 1
             e["last_reviewed_run"] = run_id
             for rev in sorted(touched):
                 # Per (file, reviewer). review-docs opening a .py file for its comments is NOT
@@ -1752,8 +1777,6 @@ def cmd_coverage(a):
                 # on the strength of the wrong reviewer's glance.
                 e["reviewed_by"][rev] = run_id
                 e["sha256_when_reviewed"][rev] = meta.get("sha256")
-        if not replay:
-            e["findings_total"] += per_file.get(path, 0)
 
     # staleness, recomputed from the run list
     if not replay:
@@ -1784,7 +1807,7 @@ def cmd_coverage(a):
     stale = sorted((e.get("runs_since_reviewed") or 0, p) for p, e in files.items()
                    if e.get("runs_since_reviewed") and not e.get("opaque"))
     print(f"coverage: {len(files)} files tracked over {len(cov['runs'])} run(s)"
-          + (" [replay — counters unchanged]" if replay else "") + f" → {cov_path}")
+          + (" [replay — this run's counts replaced]" if replay else "") + f" → {cov_path}")
     print(f"  reviewed this run: {sum(1 for e in files.values() if e.get('last_reviewed_run') == run_id)}"
           f" · never reviewed: {len(never)}"
           + (f" · opaque, not reviewable: {len(opaque)}" if opaque else ""))
@@ -1832,9 +1855,7 @@ def cmd_carryover(a):
     previously-open defect against the current source."""
     run = Path(a.run_dir).resolve()
     repo = repo_from(run_dir=run, override=a.repo)
-    rec = _load_json(a.reconciliation)
-    if not rec:
-        die(f"no reconciliation at {a.reconciliation}")
+    rec = read_reconciliation(a.reconciliation)
     run_id = resolve_run_id(rec, run_dir=run, explicit=a.run_id)
     report_fingerprints(rec, run)
     man = _load_json(run / "manifest.json")
@@ -1843,6 +1864,24 @@ def cmd_carryover(a):
 
     known = _load_json(a.out, {"defects": {}})
     known.setdefault("defects", {})
+    # Replay-safe. Resuming a run re-runs this stage, and classifying from the record this
+    # run already changed is not the same as classifying from the one it started with: a
+    # plausibly-fixed defect whose text came back was `regressed` on the first pass and
+    # `missed` on the replay. So the record before the most recent merge is kept, and a
+    # replay of that run starts again from it. An older run cannot be replayed at all —
+    # later runs were classified on top of it.
+    merged = known.setdefault("runs_merged", [])
+    replay = run_id == known.get("last_run") and "before_last_run" in known
+    if replay:
+        known["defects"] = json.loads(json.dumps(known["before_last_run"]))
+    elif run_id in merged:
+        die(f"run {run_id} was merged into {a.out} before a later run "
+            f"({known.get('last_run')}); replaying it now would reclassify defects that "
+            "later runs have already classified. Only the most recent run can be replayed.")
+    else:
+        known["before_last_run"] = json.loads(json.dumps(known["defects"]))
+        known["last_run"] = run_id
+        merged.append(run_id)
 
     # anchors seen this run, so a carried defect can be matched to fresh evidence
     anchors = {}
@@ -1987,7 +2026,8 @@ def cmd_carryover(a):
 
     still_open = {k: v for k, v in known["defects"].items() if v.get("status") == "open"}
     print(f"carryover: {len(known['defects'])} defect(s) tracked, {len(still_open)} open "
-          f"→ {a.out}")
+          f"→ {a.out}" + (" [replay — recomputed from the record before this run]"
+                          if replay else ""))
     if collisions:
         print(f"  note: {len(collisions)} fingerprint(s) carried findings with differing "
               "dispositions — two defects on one source line. The non-dropped one was kept; "
@@ -2353,26 +2393,74 @@ def cmd_audit(a):
 
 # ---------------------------------------------------------------- summarize + ledger
 
+DISPOSITIONS = ("open", "applied", "deferred", "unverifiable", "dropped")
+ITEM_KEYS = ("disposition", "fingerprint", "where", "severity", "title", "defect", "fix")
+
+
+def reconciliation_problems(r):
+    """Everything wrong with a reconciliation, as sentences; [] if carryover, summarize and
+    ledger can all use it. Normalises `corroborated_by` in place as a side effect.
+
+    The reconciler is an agent writing JSON by hand, and nothing checked what it wrote. An
+    item with severity `High` was counted in the summary's header and shown under no
+    heading; one with disposition `confirmed` vanished from the summary while the ledger
+    still counted it as reported. All three stages read the same file and must agree on what
+    is acceptable in it, so they share this check.
+    """
+    if not isinstance(r, dict):
+        return ["the reconciliation is not a JSON object"]
+    v = [f"missing top-level key '{k}'" for k in ("run_id", "date", "run_dir", "items")
+         if k not in r]
+    items = r.get("items", [])
+    if not isinstance(items, list):
+        return v + ["`items` is not a list"]
+    for i, x in enumerate(items):
+        tag = f"item {i} ({x.get('where', 'no where') if isinstance(x, dict) else '?'})"
+        if not isinstance(x, dict):
+            v.append(f"{tag} is not an object")
+            continue
+        v += [f"{tag}: missing '{k}'" for k in ITEM_KEYS if k not in x]
+        if "disposition" in x and x["disposition"] not in DISPOSITIONS:
+            v.append(f"{tag}: disposition {x['disposition']!r} not in {DISPOSITIONS}")
+        if "severity" in x and x["severity"] not in SEVERITIES:
+            v.append(f"{tag}: severity {x['severity']!r} not in {SEVERITIES}")
+        if "class" in x and x["class"] not in CLASSES:
+            v.append(f"{tag}: class {x['class']!r} not in {CLASSES}")
+        if "fingerprint" in x and not (isinstance(x["fingerprint"], str)
+                                       and x["fingerprint"].strip()):
+            v.append(f"{tag}: empty fingerprint")
+        cb = x.get("corroborated_by")
+        if cb is None:
+            continue
+        if not isinstance(cb, list) or not all(isinstance(n, str) for n in cb):
+            v.append(f"{tag}: corroborated_by must be a list of reviewer names")
+            continue
+        # The skill's own example once said `review-code`, while every findings file says
+        # `code`; the ledger then counted one reviewer under two names. Accept the old
+        # spelling, record the canonical one.
+        names = [n[len("review-"):] if n.startswith("review-") else n for n in cb]
+        bad = [n for n in names if n not in REVIEWER_LEGS]
+        if bad:
+            v.append(f"{tag}: corroborated_by names {bad}, not reviewers {REVIEWER_LEGS}")
+        else:
+            x["corroborated_by"] = sorted(set(names), key=names.index)
+    return v
+
+
+def read_reconciliation(path):
+    r = read_json(path, "reconciliation")
+    v = reconciliation_problems(r)
+    if v:
+        die(f"{path} is not a usable reconciliation ({len(v)} problem(s)):\n  - "
+            + "\n  - ".join(v[:20]) + ("\n  …" if len(v) > 20 else "")
+            + "\nThe shape is in Stage 5 of the reconcile-reviews skill.")
+    return r
+
 def cmd_summarize(a):
-    r = read_json(a.reconciliation, "reconciliation")
+    r = read_reconciliation(a.reconciliation)
     run_dir = Path(a.run_dir) if getattr(a, "run_dir", None) else Path(a.reconciliation).parent
     report_fingerprints(r, run_dir)
-    missing = [k for k in ("run_id", "date", "run_dir", "items") if k not in r]
-    if missing:
-        die(f"reconciliation is missing required top-level key(s): {', '.join(missing)}. "
-            "The shape is {run_id, date, run_dir, head?, machine?, not_reviewed?, "
-            "confidence_note?, items[]} — see Stage 5 of the "
-            "reconcile-reviews skill.")
     items = r["items"]
-    for i, x in enumerate(items):
-        # Every key the renderer goes on to read without a .get(). It used to check three and
-        # then index five, so a reconciliation missing `defect` died with a KeyError rather
-        # than a sentence naming the item.
-        for k in ("disposition", "fingerprint", "where", "severity", "title", "defect", "fix"):
-            if k not in x:
-                die(f"reconciliation item {i} ({x.get('where', 'no where')}) is missing "
-                    f"'{k}'. Every item needs: disposition, fingerprint, where, severity, "
-                    "title, defect, fix.")
     # `applied` is retired: the reconciler no longer edits the repository, so nothing is
     # fixed by the time this renders. Records written before that change still carry it, and
     # they are counted as open rather than dropped on the floor.
@@ -2565,9 +2653,7 @@ def rate_txt(v):
 
 
 def cmd_ledger(a):
-    r = read_json(a.reconciliation, "reconciliation")
-    if "items" not in r:
-        die(f"{a.reconciliation} has no `items` key, so there is nothing to tally.")
+    r = read_reconciliation(a.reconciliation)
     run_id = resolve_run_id(r, run_dir=a.run_dir, explicit=a.run_id)
     items = r["items"]
     rows = []
