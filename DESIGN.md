@@ -166,17 +166,18 @@ against it. It is a bookmark, not a timer: nothing reads its age and decides to 
 
 ### Cost
 
-A full audit costs roughly **700k tokens plus 140 per reviewable line**. That fits five
-completed audits, from 1,397 to 20,259 lines and from ~0.9M to ~3.5M tokens in actual total
-cost. It is a very rough approximation: one of the five landed a third away from it. The
-README's WARNING has the table. At a few thousand lines the fixed protocol cost dominates: a 1,400-line repository cost 80% of what a
-3,700-line one did. Trimming the preamble will not rescue this, because the preamble is ~18k
-of a reviewer's ~145k floor.
+A full audit costs roughly **700k tokens plus 140 per reviewable line**. That is a line drawn
+through the smallest and largest of five completed audits (1,397 lines and ~0.9M; 20,259 lines
+and ~3.5M), not a statistical fit, and its slope rests almost entirely on the large one. It is a
+very rough approximation: one of the five landed a third away from it. The README's WARNING has
+the table. At a few thousand lines the fixed protocol cost dominates: a 1,400-line repository
+cost 80% of what a 3,700-line one did. Trimming the preamble will not rescue this, because the
+preamble is ~18k of a reviewer's ~145k floor.
 
 Past that size the repository takes over. The 20,259-line audit cost ~3.5M, about twice what
 `review.py estimate` would have priced it at. `estimate` charges each reviewer its floor plus
 one read of the source, and on a large repository the source is re-read and re-verified many
-times over. Its line count is right; its token figure runs low above a few thousand lines.
+times over. Its line count is right; its token figure runs low on large repositories.
 
 The figure goes in front of the person before anything is spawned, which is why `estimate`
 runs in Stage 0. The first attempt on a 27,398-line repository, which `estimate` put at 1.85M
@@ -191,14 +192,14 @@ rather than all of them, and the run resumes by skipping whatever already valida
 
 ## Where the numbers on this page came from
 
-Every figure above was measured once, by hand. The miss rate and refutation rate come from
-the transcripts of the development runs on three Kaggle repositories: two consecutive reviews
-of one repository, and a controlled injection of ten fabricated findings. The cost formula
-comes from the actual token totals of five completed audits: four public Kaggle solutions and
-one private repository, run on more than one machine. **None of them has a script in this repository that reproduces it**, and
-the runs themselves were not kept. They are recorded here because a rough, honestly-labelled
-figure is more useful than silence about cost, and they should be read as one-off observations
-rather than as measurements you can check.
+Every figure above was measured once, by hand. The miss rate and refutation rate come from the
+transcripts of the development runs on three Kaggle repositories: two consecutive reviews of one
+repository, and a controlled injection of ten fabricated findings. The cost formula comes from
+the actual token totals of five completed audits: four public Kaggle solutions and one private
+repository, run on more than one machine. **None of them has a script in this repository that
+reproduces it**, and the runs themselves were not kept. They are recorded here because a rough,
+honestly-labelled figure is more useful than silence about cost, and they should be read as
+one-off observations rather than as measurements you can check.
 
 That is a deliberate exception to this kit's own `N-1`, and the only one in it. Treat any of
 these numbers as stale the moment the protocol changes: the ledger (`$STORE/ledger.jsonl`) is
@@ -235,9 +236,8 @@ what gives you figures for *your* repository, and those do have a source.
   created inside a directory that was already untracked or ignored — a `.pytest_cache/` left
   by an earlier run, a new file in `.venv/` — does not show, and nor does an edit to an
   existing ignored file, which is not hashed. Outside a git repository it does not run.
-- **The bookkeeping has no test suite and no CI.** `bin/` is roughly 3,650 lines of Python,
-  and the section above argues that every failure this kit has had came from that half rather
-  than from the judgement half — yet every regression in it has been caught by running a
-  review, not by a check that runs on its own. The fixtures in this repository's history live
-  in commit messages, not in a suite.
+- **The bookkeeping's test suite is new and partial, and there is no CI yet.** `bin/` is
+  roughly 3,650 lines of Python, and the section above argues that every failure this kit has
+  had came from that half rather than from the judgement half. Until recently every
+  regression in it was caught by running a review; `tests/` is where that is changing.
 - **Nothing measures whether a *confirmation* was earned** — only whether a refutation was.

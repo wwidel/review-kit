@@ -9,14 +9,15 @@ so far:
 tokens ≈ 700k + 140 × reviewable lines
 ```
 
-**This is a very rough approximation, not a price.** It is fitted to five audits, and one of
-them landed a third away from it. What a repository costs depends on more than its size, and
-a repository unlike these five may land further off, in either direction. Budget for more than
-it says.
+**This is a very rough approximation, not a price.** It is a line drawn through the smallest
+and largest of five completed audits, not a statistical fit, and one of the five landed a third
+away from it. The per-line term rests almost entirely on the one large audit. What a repository
+costs depends on more than its size, and a repository unlike these five may land further off,
+in either direction. Budget for more than it says.
 
-The 700k is roughly the fixed cost of four reviewer legs and the reconciler. The per-line term
-is the source being read, re-read and verified. A single audit can use up a weekly usage limit,
-and one already has.
+Small repositories cost close to the fixed part, because the protocol itself is expensive;
+large ones are dominated by the source being read, re-read and verified. A single audit can use
+up a weekly usage limit, and one already has.
 
 | repository | reviewable lines | actual total | formula |
 |---|---:|---:|---:|
@@ -26,9 +27,10 @@ and one already has.
 | Solution E | 4,760 | ~1.04M | 1.37M |
 | a private repository | 20,259 | ~3.5M | 3.54M |
 
-`/repo-audit` prints the reviewable line count and stops for your go-ahead before it spawns any
-reviewer. Apply the formula to that count. Ignore the token figure printed next to it, which
-runs low on large repositories: at 20,000 lines it says about 1.8M. To spend less, use
+Before it spawns any reviewer, `/repo-audit` shows `review.py estimate`'s reviewable line count
+and token figure, and stops for your go-ahead. That token figure can run low on large
+repositories: for the 20,259-line one it came to about 1.8M, against ~3.5M actually spent. Apply
+the formula to the line count too, and go by the larger of the two. To spend less, use
 `--since <ref>` or run one single-purpose skill (see [Run](#run)).
 
 **Tested on Linux and WSL only.** macOS has not been tried. `review.py machine` reads memory
@@ -53,7 +55,7 @@ so the decision to spend five agents on a review stays with whoever is paying fo
 Clone the kit somewhere, then point it at a repository:
 
 ```bash
-git clone git@github.com:wwidel/review-kit.git ~/tools/review-kit
+git clone https://github.com/wwidel/review-kit.git ~/tools/review-kit
 python3 ~/tools/review-kit/bin/install.py --repo ~/code/some-project
 ```
 
@@ -73,7 +75,8 @@ A plain `install.py --repo <path>` writes nothing into the repository at all.
 
 **A review runs from a session started in the repository being reviewed.** This is the only
 supported mode, and the rest of the design follows from it. The access-log hook takes no
-configuration because its working directory *is* the repository under review; nothing
+configuration because the directory each tool runs in *is* the repository under review, or a
+subdirectory of it — the hook walks up to the nearest directory with a store; nothing
 per-repository is baked into any settings file, so installing for a second repository cannot
 disturb the first. `review.py preflight` checks the rule at the start of every run and refuses
 a review launched from anywhere else, because the failure is otherwise silent — reads recorded
@@ -409,17 +412,19 @@ being checked. In `.claude/settings.json`:
 }
 ```
 
-The hook takes no configuration: it logs to the store of whichever repository the session is
-in, and writes nothing at all for a directory that has no store. For a Bash command it follows
-`cd` (scoped to its subshell), simple `VAR=value` assignments, `for` loops, brace lists and a
-plain `find … -exec cat` or `find … | xargs cat`, and resolves each name against the directory
-the shell would be in, so `cd src && for f in a b; do cat -n $f.py; done` logs both files. It
-credits a file only when its content came back: not `wc`, `ls` or `echo`, not `grep -l` or
-`grep -q`, and not a reader whose output went to a file or into `| wc`. It also stores the raw
-command, which is what lets `audit` tell a read it could not follow from a file no command
-named. Without the hook, `audit`
-refuses to run rather than reporting a pass it cannot support — and it ignores records
-older than the run it is checking, so a read from an earlier run cannot vouch for this one.
+The hook takes no configuration: it logs to the store of the repository the tool ran in, walking
+up from the tool's directory so that a `cd src` keeps logging, and writes nothing at all where
+no directory on the way up has a store. Writes and edits are logged too, but `audit` does not
+count them as reads, and nor does it count a record with no agent id. For a Bash command it
+follows `cd` (scoped to its subshell), simple `VAR=value` assignments, `for` loops, brace lists
+and a plain `find … -exec cat` or `find … | xargs cat`, and resolves each name against the
+directory the shell would be in, so `cd src && for f in a b; do cat -n $f.py; done` logs both
+files. It credits a file only when its content came back: not `wc`, `ls` or `echo`, not `grep
+-l` or `grep -q`, and not a reader whose output went to a file or into `| wc`. It also stores
+the raw command, which is what lets `audit` tell a read it could not follow from a file no
+command named. Without the hook, `audit` refuses to run rather than reporting a pass it cannot
+support — and it ignores records older than the run it is checking, so a read from an earlier
+run cannot vouch for this one.
 
 Be clear-eyed about what this does and does not prove. It shows that a tool call touching a
 file was issued — not that the content was attended to. It is a floor, not a guarantee, and it

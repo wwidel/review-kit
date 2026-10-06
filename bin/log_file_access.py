@@ -2,10 +2,11 @@
 """PostToolUse hook: append every file a tool touched to that repository's access log.
 
 Wired once, globally, with no configuration (see review-kit/README.md). It writes to
-`~/.review-kit/<repo>-<hash>/review/access.jsonl` for whichever repository the session is
-working in, and **writes nothing at all for a directory that has no store** — so it is inert
-everywhere the kit was not installed, and nothing is ever created inside the repository under
-review.
+`~/.review-kit/<repo>-<hash>/review/access.jsonl` for the repository the tool ran in: the
+payload's `cwd`, or its nearest ancestor with a store, so a `cd` into a subdirectory keeps
+logging. It **writes nothing at all where no directory on the way up has a store**, so it is
+inert outside the repositories the kit was installed for, and nothing is ever created inside
+the repository under review.
 
 Reviewers cannot see or write this log, so `review.py audit` can compare it against what a
 reviewer *claimed* to read. This is the only check in the kit that a lying agent cannot defeat
@@ -83,8 +84,18 @@ def looks_like_path(s: str, root: str) -> bool:
         return False
 
 
-def store_for(root):
-    """The review store for this working directory, or None if the kit is not installed here.
+def store_for(start):
+    """The review store of the nearest directory at or above `start` that has one, or None.
+
+    Walking up is what keeps a `cd` from switching the log off. Claude Code runs the hook in
+    the session's current directory, and the version that looked only there wrote nothing
+    once an agent had run `cd src`: the reads that followed were never logged, and `audit`
+    would have reported them as claims nobody could support.
+
+    The path is walked as written first and then with symlinks resolved, so a symlinked
+    subdirectory (`data -> /mnt/data`) still finds the repository it sits in. Anything below
+    an installed repository logs to its store — a nested git checkout or a vendored copy
+    included — because those files are inside the tree being reviewed.
 
     The slug comes from the kit's own `review.py` rather than a copy, so the hook and every
     other stage can never disagree about where a repository's store is. Importing it costs
@@ -96,10 +107,16 @@ def store_for(root):
             "review_kit_review", Path(__file__).resolve().parent / "review.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        store = mod.store_path(Path(root))
+        written = Path(os.path.abspath(start))
+        resolved = written.resolve()
+        for top in (written, resolved) if resolved != written else (written,):
+            for d in (top, *top.parents):
+                store = mod.store_path(d)
+                if store.is_dir():
+                    return store
     except Exception:
-        return None
-    return store if store.is_dir() else None
+        pass
+    return None
 
 
 def strip_heredocs(cmd: str):
@@ -592,19 +609,20 @@ def paths_from(tool, inp, cwd=None, state=None):
     return {p for p in out if p and not p.startswith("-")}
 
 
-def filtered(paths, root):
-    """Plausible paths, one spelling each: an existing relative path is resolved to absolute."""
+def filtered(paths, cwd):
+    """Plausible paths, one spelling each, all absolute. A relative path is relative to the
+    directory the tool ran in — the payload's `cwd` — not to the repository root: after
+    `cd src`, a Read of `m.py` means src/m.py."""
     out = set()
     for p in paths:
-        if not looks_like_path(p, root):
+        if not looks_like_path(p, cwd):
             continue
         if not p.startswith("/"):
             try:
-                q = (Path(root) / p).resolve()
-                if q.is_file():
-                    p = str(q)
+                q = Path(cwd) / p
+                p = str(q.resolve()) if q.is_file() else os.path.normpath(str(q))
             except (OSError, ValueError):
-                pass
+                p = os.path.normpath(os.path.join(cwd, p))
         out.add(p)
     return sorted(out)
 
@@ -620,18 +638,19 @@ def main():
     if tool not in ("Read", "Bash", "NotebookEdit", "Edit", "Write", "Grep", "Glob"):
         return
     inp = ev.get("tool_input") or {}
-    root = os.environ.get("REVIEW_ACCESS_ROOT") or os.getcwd()
-    logdir = store_for(root)
+    # Where the tool ran: the payload says, and the hook process's own directory is only the
+    # fallback. REVIEW_ACCESS_ROOT, if set, overrides both as the place to start looking.
+    cwd = ev.get("cwd") or os.getcwd()
+    logdir = store_for(os.environ.get("REVIEW_ACCESS_ROOT") or cwd)
     if logdir is None:
-        # No store for this directory, so this is not a repository anyone installed the kit
-        # for. Writing anyway is how the previous version littered a `.review/` into every
-        # directory a session ever touched — and worse, that bare directory then read as an
-        # in-repo install and put a whole run inside the repository being audited.
+        # No store here or above, so this is not a repository anyone installed the kit for.
+        # Writing anyway is how an earlier version littered a `.review/` into every directory
+        # a session ever touched — and worse, that bare directory then read as an in-repo
+        # install and put a whole run inside the repository being audited.
         return
     try:
-        cwd = ev.get("cwd") or root
         state = {}
-        paths = filtered(paths_from(tool, inp, cwd, state), root)
+        paths = filtered(paths_from(tool, inp, cwd, state), cwd)
         rec = {"t": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
                "tool": tool, "agent": ev.get("agent_id") or ev.get("session_id"),
                "paths": paths[:MAX_PATHS]}

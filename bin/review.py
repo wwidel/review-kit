@@ -658,12 +658,13 @@ def hook_wired(repo: Path):
 def cmd_preflight(a):
     """Check the conditions a review depends on, before anything is spawned.
 
-    One of them cannot be checked any other way: the access-log hook writes its log beside
-    whichever directory the session is CURRENTLY in, not the one it started in. Auditing repo
-    A from a shell sitting in repo B silently logs A's reads into B's store, and `audit` then
-    reports every honest reviewer as having claimed a file it never opened. The kit's rule is
-    that a review runs from inside the repository it reviews; this is the only thing that
-    enforces it.
+    One of them cannot be checked any other way: the access-log hook logs to the store of the
+    repository the session is CURRENTLY in (walking up from its directory), not the one under
+    review. Auditing repo A from a shell sitting in repo B silently logs A's reads into B's
+    store, and `audit` then reports every honest reviewer as having claimed a file it never
+    opened. The kit's rule is that a review runs from the root of the repository it reviews;
+    this is the only thing that enforces it. A subdirectory would log correctly, but every
+    stage after this one also assumes the shell starts at the root.
     """
     repo = Path(a.repo).resolve()
     cwd = Path.cwd().resolve()
@@ -672,8 +673,9 @@ def cmd_preflight(a):
     if cwd != repo:
         problems.append(
             f"the shell is in {cwd}\n    but the repository under review is {repo}.\n"
-            "    Run the review from inside the repository: the access-log hook follows the\n"
-            "    working directory, so reads would be recorded against the wrong store.")
+            "    Run the review from the repository's root: from anywhere outside it, the\n"
+            "    access-log hook records reads against the wrong store, and the later stages\n"
+            "    assume they start at the root.")
 
     cfg = read_config(repo)
     if not cfg:
@@ -2014,6 +2016,10 @@ def cmd_store(a):
 
 # ---------------------------------------------------------------- audit (scope honesty)
 
+# Tools whose records show a file being modified, not read. The hook logs them; `audit` never
+# lets them support a claim to have read the file.
+WRITE_TOOLS = ("Write", "Edit", "NotebookEdit")
+
 def git_toplevel(repo: Path) -> Path:
     r = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=repo,
                        capture_output=True, text=True)
@@ -2132,15 +2138,18 @@ def cmd_audit(a):
                 rec = json.loads(line)
             except ValueError:
                 continue
-            e = seen.setdefault(rec.get("agent") or "(no agent id)",
+            e = seen.setdefault(rec.get("agent") or "(no agent id — ignored by audit)",
                                 {"calls": 0, "paths": set()})
             e["calls"] += 1
-            e["paths"].update(rec.get("paths", []))
+            if rec.get("tool") not in WRITE_TOOLS:
+                # Matching a reviewer by files it wrote would pair it on evidence audit
+                # itself refuses to count.
+                e["paths"].update(rec.get("paths", []))
         if not seen:
             die(f"{logp} holds no usable records.")
         print(f"agents in {logp}:")
         for agent, e in sorted(seen.items(), key=lambda kv: -kv[1]["calls"]):
-            print(f"  {agent}   {e['calls']} call(s), {len(e['paths'])} distinct path(s)")
+            print(f"  {agent}   {e['calls']} call(s), {len(e['paths'])} distinct path(s) read")
             for q in sorted(e["paths"])[:6]:
                 print(f"      {q}")
         print("\nMatch each id to a reviewer by the paths it touched, then audit each findings "
@@ -2175,7 +2184,7 @@ def cmd_audit(a):
         die(f"--since {since!r} is not an ISO timestamp.")
     if floor.tzinfo is None:
         floor = floor.replace(tzinfo=datetime.timezone.utc)
-    stale = 0
+    stale = unattributed = 0
     for line in logp.read_text(encoding="utf-8").splitlines():
         try:
             rec = json.loads(line)
@@ -2193,11 +2202,20 @@ def cmd_audit(a):
         if t < floor:
             stale += 1
             continue
-        if rec.get("agent"):
-            agents_seen.add(rec["agent"])
-        if a.agent and rec.get("agent") != a.agent:
-            # A record with no agent id is unattributable, so it cannot support anyone's
-            # claim. Previously it supported everyone's.
+        if not rec.get("agent"):
+            # A record with no agent id is unattributable, so it supports nobody's claim —
+            # with or without --agent. Claude Code always sends an id; the only id-less
+            # records seen so far were test payloads piped in by hand, and an earlier version
+            # let them vouch for whichever reviewer was the only named one in the log.
+            unattributed += 1
+            continue
+        agents_seen.add(rec["agent"])
+        if a.agent and rec["agent"] != a.agent:
+            continue
+        if rec.get("tool") in WRITE_TOOLS:
+            # Logged as evidence that something was modified, never as a read: writing a
+            # file is not reading it. An honest reviewer that edits a file it did not create
+            # will normally have Read it first, and that Read is what supports the claim.
             continue
         if rec.get("reads") and rec.get("cmd"):
             commands.append((rec["cmd"], rec.get("cwd") or str(repo)))
@@ -2252,7 +2270,8 @@ def cmd_audit(a):
     print(f"audit {name}: {len(checkable)} of {len(declared)} declared file(s) are checkable "
           f"against this log; {len(touched & checkable)} of those appear in it")
     print(f"  records considered: those at or after {floor.isoformat()}"
-          + (f"; {stale} earlier or undated record(s) ignored" if stale else ""))
+          + (f"; {stale} earlier or undated record(s) ignored" if stale else "")
+          + (f"; {unattributed} record(s) with no agent id ignored" if unattributed else ""))
     if outside:
         print(f"  note: {len(outside)} declared path(s) lie outside {repo} and cannot be "
               "checked against this log: " + ", ".join(outside[:4]), file=sys.stderr)

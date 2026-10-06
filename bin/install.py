@@ -7,11 +7,11 @@ access-log hook to `~/.claude/settings.json`, and every artefact a review produc
 `--with-rules` does, placing REVIEW-RULES.md there and never over an existing file. The
 summary is written later, by a run, and is the deliverable.
 
-That is possible because of one rule the kit depends on: **a review runs from a session
-started in the repository being reviewed.** The hook then needs no configuration at all — its
-working directory is the repository — and nothing per-repository is baked into any settings
-file, so installing for a second repository cannot disturb the first. `review.py preflight`
-enforces the rule rather than assuming it.
+That is possible because of one rule the kit depends on: **a review runs from a session started
+in the repository being reviewed.** The hook then needs no configuration at all — the directory
+each tool runs in is inside the repository — and nothing per-repository is baked into any
+settings file, so installing for a second repository cannot disturb the first. `review.py
+preflight` enforces the rule rather than assuming it.
 
 Idempotent: safe to re-run, for this repository or any other. Stdlib only.
 """
@@ -164,8 +164,9 @@ def install_rules(repo: Path):
 def install_hook():
     """Wire the access-log hook once, globally, with no per-repository configuration.
 
-    It carries no `REVIEW_ACCESS_ROOT`: the hook derives the store from its own working
-    directory, which under this kit's one rule is the repository under review. Baking a path
+    It carries no `REVIEW_ACCESS_ROOT`: the hook derives the store from the directory each
+    tool ran in, walking up to the nearest one that has a store, which under this kit's one
+    rule is the repository under review. Baking a path
     in here is what let a second install silently stop the first repository being logged —
     one hook line, pointing at whichever repo was installed last.
     """
