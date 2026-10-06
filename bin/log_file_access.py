@@ -92,10 +92,11 @@ def store_for(start):
     once an agent had run `cd src`: the reads that followed were never logged, and `audit`
     would have reported them as claims nobody could support.
 
-    The path is walked as written first and then with symlinks resolved, so a symlinked
-    subdirectory (`data -> /mnt/data`) still finds the repository it sits in. Anything below
-    an installed repository logs to its store — a nested git checkout or a vendored copy
-    included — because those files are inside the tree being reviewed.
+    The path is walked as written first, which is what lets a symlinked subdirectory
+    (`data -> /mnt/data`) find the repository it sits in; then with symlinks resolved, which
+    is what finds a repository reached through an alias of its root. Anything below an
+    installed repository logs to its store, a nested git checkout or a vendored copy
+    included, because those files are inside the tree being reviewed.
 
     The slug comes from the kit's own `review.py` rather than a copy, so the hook and every
     other stage can never disagree about where a repository's store is. Importing it costs

@@ -131,7 +131,10 @@ overwritten by an install.
 
 `PRACTICES.md`, `FINDINGS.md` and `bin/` stay where they are — the skills reference all three by
 path and read them at run time, so the kit's checkout must stay intact. The install records
-where it lives, so `review.py store --repo . --kit` answers that question later.
+where it lives, so `review.py store --repo . --kit` answers that question later. If you move or
+copy the checkout, re-run `install.py --repo <path>` from the new location for each repository:
+it repoints its own skill links, says so if they pointed at another checkout that still exists,
+and leaves anyone else's links alone.
 
 `install.py` merges into an existing `settings.json` rather than replacing it, is safe to
 re-run, and refuses loudly if that file is not valid JSON — a malformed settings file silently

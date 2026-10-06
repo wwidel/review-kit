@@ -127,6 +127,13 @@ def test_a_symlinked_subdirectory_still_finds_the_repository(installed, repo, tm
     assert len(records(installed)) == 1
 
 
+def test_a_repository_reached_through_an_alias_is_found(installed, repo, tmp_path):
+    alias = tmp_path / "alias"
+    alias.symlink_to(repo)
+    hook(read_payload(alias / "a.py", alias), cwd=alias)
+    assert len(records(installed)) == 1
+
+
 def test_write_and_edit_are_logged(installed, repo):
     for tool in ("Write", "Edit"):
         hook({"tool_name": tool, "tool_input": {"file_path": str(repo / "a.py")},

@@ -17,7 +17,7 @@ Idempotent: safe to re-run, for this repository or any other. Stdlib only.
 """
 from __future__ import annotations
 
-import argparse, datetime, importlib.util, json, os, shutil, sys
+import argparse, datetime, importlib.util, json, os, shlex, shutil, sys
 from pathlib import Path
 
 KIT = Path(__file__).resolve().parent.parent
@@ -72,15 +72,26 @@ def ours(path: Path, name: str, owned: dict) -> bool:
     hand-written skill by inspection at all — that version also unlinked whatever symlink it
     found and silently repointed a user's own skill at ours, exit 0, nothing said.
 
-    A real directory is therefore never ours. A dangling symlink is ours if the record claims
-    it, so a kit that moved can be repaired rather than refused.
+    A real directory is therefore never ours. A symlink the record claims is also ours when it
+    still points where the record says this kit linked it, whether or not that path exists:
+    that is this kit after a move (the link dangles) or a copy (it points at the old
+    checkout), and it is repaired rather than refused. A link the user repointed elsewhere,
+    dangling or not, stays theirs. The check used to rely on `resolve()` raising for a
+    dangling link, which it never does, so a moved kit was refused by install and kept by
+    --uninstall, with no way out but deleting links by hand.
     """
     if not path.is_symlink():
         return False
     try:
-        return path.resolve() == (KIT / "skills" / name).resolve()
-    except OSError:
-        return name in owned
+        target = path.resolve()
+    except (OSError, RuntimeError):     # a symlink loop raises RuntimeError before 3.13
+        return False
+    if target == (KIT / "skills" / name).resolve():
+        return True
+    if name not in owned:
+        return False
+    source = owned[name].get("source") if isinstance(owned[name], dict) else None
+    return bool(source) and target == Path(source).resolve()
 
 
 def plan_skills():
@@ -110,16 +121,22 @@ def install_skills():
         for c in clashes:
             print(f"    {c}", file=sys.stderr)
         print("\nThey are yours, and replacing them would be irrecoverable. NOTHING HAS BEEN "
-              "WRITTEN.\nRename or move them and re-run — or run --uninstall first if they "
-              "are in fact leftovers\nfrom an older install of this kit.", file=sys.stderr)
+              "WRITTEN.\nRename or move them and re-run. If one is in fact a leftover from an "
+              "older install\nof this kit, delete it by hand: --uninstall removes only what "
+              "this check accepts as ours.", file=sys.stderr)
         sys.exit(2)
 
     SKILLS_HOME.mkdir(parents=True, exist_ok=True)
     now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-    done = []
+    done, moved_from = [], set()
     for skill in todo:
         out = SKILLS_HOME / skill.name
         if out.is_symlink():
+            old = out.resolve()
+            if old != skill.resolve() and old.exists():
+                # Another checkout of this kit, still on disk. Every repository installed
+                # from it now runs these skills against its own bin/ — worth saying.
+                moved_from.add(str(old.parent.parent))
             # Ours, from an earlier install: replaced, so an updated kit actually reaches the
             # skills a reviewer reads. Never anything but a symlink — plan_skills refuses the
             # rest before a single write happens.
@@ -128,7 +145,7 @@ def install_skills():
         owned[skill.name] = {"source": str(skill), "installed": now}
         done.append(skill.name)
     save_ownership(owned)
-    return SKILLS_HOME, done
+    return SKILLS_HOME, done, sorted(moved_from)
 
 
 def uninstall_skills():
@@ -148,7 +165,10 @@ def uninstall_skills():
         else:
             shutil.rmtree(out)
         removed.append(name)
-    save_ownership({k: v for k, v in owned.items() if k not in removed})
+    if removed:
+        # Only when something changed: --uninstall on a machine where nothing was installed
+        # used to create ~/.review-kit/ just to record that nothing was there.
+        save_ownership({k: v for k, v in owned.items() if k not in removed})
     return removed, skipped
 
 
@@ -161,6 +181,49 @@ def install_rules(repo: Path):
     return dest, True
 
 
+def read_settings() -> dict:
+    """The user's settings, or exit 2 before anything is written if they cannot be merged into.
+
+    Checked down to the shape install_hook edits, not just the top level: `"hooks": []` is
+    valid JSON, and it used to pass this check and then crash install_hook with a traceback
+    after the skills, the store and the config had been written.
+    """
+    if not SETTINGS.exists():
+        return {}
+    problem = None
+    try:
+        cfg = json.loads(SETTINGS.read_text(encoding="utf-8"))
+    except OSError as e:
+        cfg, problem = None, f"cannot be read ({e.strerror or e})"
+    except ValueError as e:
+        cfg, problem = None, f"is not valid JSON ({e})"
+    if problem is None:
+        problem = settings_shape_problem(cfg)
+    if problem:
+        print(f"error: {SETTINGS} {problem}.", file=sys.stderr)
+        print("A malformed settings file silently disables EVERY setting in it. "
+              "Fix it before re-running. NOTHING HAS BEEN WRITTEN.", file=sys.stderr)
+        sys.exit(2)
+    return cfg
+
+
+def settings_shape_problem(cfg):
+    """Why install_hook could not merge into these settings, or None if it can."""
+    if not isinstance(cfg, dict):
+        return "is not a JSON object"
+    hooks = cfg.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return "has a `hooks` value that is not an object"
+    post = hooks.get("PostToolUse", [])
+    if not isinstance(post, list):
+        return "has a `hooks.PostToolUse` value that is not a list"
+    for i, entry in enumerate(post):
+        inner = entry.get("hooks", []) if isinstance(entry, dict) else None
+        if not isinstance(inner, list) or not all(isinstance(h, dict) for h in inner):
+            return f"has a malformed `hooks.PostToolUse` entry (#{i + 1})"
+    return None
+
+
 def install_hook():
     """Wire the access-log hook once, globally, with no per-repository configuration.
 
@@ -171,28 +234,42 @@ def install_hook():
     one hook line, pointing at whichever repo was installed last.
     """
     SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-    cfg = {}
-    if SETTINGS.exists():
-        try:
-            cfg = json.loads(SETTINGS.read_text(encoding="utf-8"))
-        except ValueError as e:
-            print(f"error: {SETTINGS} is not valid JSON ({e}).", file=sys.stderr)
-            print("A malformed settings file silently disables EVERY setting in it. "
-                  "Fix it before re-running.", file=sys.stderr)
-            sys.exit(2)
+    cfg = read_settings()
 
-    cmd = f"python3 {KIT / 'bin' / 'log_file_access.py'}"
+    # Quoted: the command goes through a shell, and a kit under "~/My Tools/" would otherwise
+    # run `python3 ~/My` and fail on every tool call, silently.
+    cmd = f"python3 {shlex.quote(str(KIT / 'bin' / 'log_file_access.py'))}"
     post = cfg.setdefault("hooks", {}).setdefault("PostToolUse", [])
 
     # Deduplicate on the SCRIPT, not on an exact matcher string. MATCHER has already changed
     # once in this kit's life, and matching on it meant an upgrade appended a second entry
     # instead of updating the first — leaving a stale hook pointing at an old path, which
-    # then failed on every Read, Bash, Grep, Glob, Edit and Write.
-    for entry in post:
-        entry["hooks"] = [h for h in entry.get("hooks", [])
-                          if "log_file_access.py" not in str(h.get("command", ""))]
-    post[:] = [e for e in post if e.get("hooks")]
-    post.append({"matcher": MATCHER, "hooks": [{"type": "command", "command": cmd}]})
+    # then failed on every Read, Bash, Grep, Glob, Edit and Write. The first entry that is
+    # wholly ours is updated where it stands, so a re-run leaves the file byte-identical
+    # even when other hooks follow it.
+    def is_ours(h):
+        return "log_file_access.py" in str(h.get("command", ""))
+    had_ours = [any(is_ours(h) for h in e.get("hooks", [])) for e in post]
+    slot = next((i for i, e in enumerate(post)
+                 if e.get("hooks") and all(is_ours(h) for h in e["hooks"])), None)
+    # Our hook object, keeping any keys the user added to it (a `timeout`, say).
+    mine = dict(post[slot]["hooks"][0]) if slot is not None else {}
+    mine.update({"type": "command", "command": cmd})
+    kept = []
+    for i, entry in enumerate(post):
+        if i == slot:
+            entry["matcher"] = MATCHER
+            entry["hooks"] = [mine]
+        elif had_ours[i]:
+            # Only entries that held our hook are edited, and dropped only if that leaves
+            # them empty: an entry of the user's, empty or not, is never touched.
+            entry["hooks"] = [h for h in entry["hooks"] if not is_ours(h)]
+            if not entry["hooks"]:
+                continue
+        kept.append(entry)
+    if slot is None:
+        kept.append({"matcher": MATCHER, "hooks": [mine]})
+    post[:] = kept
 
     # Via a temp file and rename: these are the user's settings, and a crash between truncate
     # and write leaves them with the malformed file this function warns about above.
@@ -233,9 +310,12 @@ def main():
         print(f"error: no such directory: {repo}", file=sys.stderr)
         sys.exit(2)
 
-    # Skills first: it is the step that can refuse, and refusing after the store and config
-    # were written would leave a half-installed repository behind.
-    dest, skills = install_skills()
+    # Every check that can refuse runs before the first write: the settings file, then the
+    # skills. A malformed settings file used to be found last, after the skills, the store
+    # and the config were already written.
+    if not a.no_hook:
+        read_settings()
+    dest, skills, moved_from = install_skills()
 
     store = RV.store_path(repo)
     store.mkdir(parents=True, exist_ok=True)
@@ -245,6 +325,11 @@ def main():
     print(f"repo:   {repo}")
     print(f"store:  {store}")
     print(f"skills: {len(skills)} symlinked into {dest}")
+    for old in moved_from:
+        print(f"  NOTE: these links pointed at another checkout of this kit, {old}, which still "
+              "exists.\n  They now point here. A repository installed from that checkout keeps "
+              "its own bin/\n  but will read these skills; re-run install.py for it from "
+              "whichever checkout it should use.")
     print(f"config: {RV.config_path(repo)}")
 
     if a.with_rules:
@@ -261,9 +346,9 @@ def main():
         cmd = install_hook()
         print(f"\nhook:   PostToolUse on {MATCHER} → {SETTINGS}")
         print(f"        {cmd}")
-        print("        It takes no configuration: it logs to the store of whichever "
-              "repository the session\n        is in, and writes nothing at all for a "
-              "directory that has no store.")
+        print("        It takes no configuration: it logs to the store of the repository "
+              "each tool ran in,\n        and writes nothing at all outside an installed "
+              "repository.")
         print("\n        UNVERIFIED until your first run. A hook that is not firing is "
               "invisible until\n        `audit` reports no access log — if that happens, open "
               "/hooks once or restart the\n        session, because the settings watcher may "
@@ -282,9 +367,9 @@ def main():
               f"claimed {summary} instead.")
 
     print(f"\nNow START A NEW SESSION IN {repo} and type /repo-audit.")
-    print("That is the only supported way to run this: the access hook follows the session's")
-    print("working directory, and `review.py preflight` refuses a review launched from "
-          "anywhere else.")
+    print("That is the only supported way to run this: the access hook logs to the repository "
+          "the session")
+    print("is in, and `review.py preflight` refuses a review launched from anywhere else.")
 
 
 if __name__ == "__main__":

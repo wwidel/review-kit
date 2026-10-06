@@ -180,9 +180,8 @@ one read of the source, and on a large repository the source is re-read and re-v
 times over. Its line count is right; its token figure runs low on large repositories.
 
 The figure goes in front of the person before anything is spawned, which is why `estimate`
-runs in Stage 0. The first attempt on a 27,398-line repository, which `estimate` put at 1.85M
-and the formula puts nearer 4.5M, exhausted a weekly limit with four reviewers running
-concurrently. All four died before writing a findings file: full cost, no artefact.
+runs in Stage 0. The first attempt on a 27,398-line repository, which `estimate` put at 1.85M,
+exhausted a weekly limit with four reviewers running concurrently. All four died before writing a findings file: full cost, no artefact.
 
 That is also why reviewers are spawned **one at a time**. Sequential execution gives up
 wall-clock time and buys partial results: a limit then costs the legs that had not started,

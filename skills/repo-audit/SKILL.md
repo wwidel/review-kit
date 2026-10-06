@@ -54,10 +54,10 @@ matches the working tree — findings cite line numbers, and a tree that moved m
 meaningless.
 
 **Run `preflight` first and stop if it fails.** It checks the one condition everything else
-rests on: that this session is *in* the repository being reviewed. The access-log hook follows
-the working directory, so a review launched from somewhere else records its reads against
-another repository's store, and `audit` then reports every honest reviewer as having claimed a
-file it never opened. It also confirms the kit is installed for this repo and tells you
+rests on: that this session is *in* the repository being reviewed. The access-log hook logs to
+the store of the repository the session is in, so a review launched from somewhere else records
+its reads against another repository's store, or nowhere at all, and `audit` then reports every
+honest reviewer as having claimed a file it never opened. It also confirms the kit is installed for this repo and tells you
 whether the hook is wired.
 
 **Derive every path; hard-code none of them.** The store, the summary filename and the kit's
@@ -363,7 +363,7 @@ how the reviewer might have read it, and never call it unprovable — the comman
 Exit 1 — UNSUPPORTED CLAIM — means the file is named in no reading command at all.
 
 The ids are the harness's, not names you choose, so `audit --list-agents` prints the ones in
-the log together with what each touched; match them to reviewers by those paths. **If the
+the log together with the paths each read; match them to reviewers by those paths. **If the
 mapping cannot be established, do not guess it.** Skip `audit` and say in the handover that
 scope honesty went unchecked this run — an unchecked claim that is labelled unchecked is a
 manageable state, and a reviewer credited with another's reads is not.

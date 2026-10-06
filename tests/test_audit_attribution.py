@@ -69,3 +69,20 @@ def test_hook_output_feeds_audit_end_to_end(tmp_path, installed, repo):
     assert recs
     r = audit_case(tmp_path, repo, ["src/m.py"], recs)
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_list_agents_shows_read_paths_only_and_flags_unattributed(tmp_path, repo):
+    from conftest import run
+    log = tmp_path / "access.jsonl"
+    import json as _json
+    log.write_text("".join(_json.dumps(r) + "\n" for r in [
+        {"t": "2026-01-01T00:00:00+00:00", "tool": "Read", "agent": "x",
+         "paths": [str(repo / "a.py")]},
+        {"t": "2026-01-01T00:00:00+00:00", "tool": "Write", "agent": "x",
+         "paths": [str(repo / "src" / "m.py")]},
+        {"t": "2026-01-01T00:00:00+00:00", "tool": "Read", "paths": [str(repo / "README.md")]}]))
+    r = run("review.py", "audit", "--repo", repo, "--access-log", log, "--list-agents", cwd=repo)
+    assert r.returncode == 0
+    assert "x   2 call(s), 1 distinct path(s) read" in r.stdout
+    assert "m.py" not in r.stdout
+    assert "(no agent id — ignored by audit)" in r.stdout
