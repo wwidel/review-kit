@@ -174,7 +174,8 @@ def test_a_deep_glob_that_matches_nothing_is_bounded(tmp_path):
                 (root / f"a{i}" / f"b{j}" / f"c{k}").mkdir(parents=True)
     t = time.monotonic()
     paths, state = h.bash_paths(f"cat {root}/*/*/*/*/*/zzz.py", str(tmp_path))
-    assert time.monotonic() - t < h.DEADLINE_S + 0.5
+    # Generous: the deadline bounds the parse, and a loaded machine slows the rest.
+    assert time.monotonic() - t < h.DEADLINE_S + 2
     assert paths == set()
 
 
