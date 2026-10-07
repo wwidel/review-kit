@@ -24,11 +24,22 @@ About five minutes, in a fresh Claude Code session:
    running when the hook was installed, open `/hooks` once or restart the session.
 2. Start a session in the scratch repository's root and ask it to spawn one subagent that runs
    `cd src`, then reads the file there with the Read tool and with `cat`.
-3. Run `python3 <review-kit>/bin/review.py audit --repo . --access-log "$(python3
-   <review-kit>/bin/review.py store --repo .)/access.jsonl" --list-agents`. The subagent's id
-   must be listed, with the file among the paths it read.
-4. Write a findings file declaring that file in `scope.files_read`, and run `audit` with
-   `--findings <file> --agent <id> --since <a time just before step 2>`. It must exit 0.
+3. In a shell in the scratch repository, list the agents the log saw:
+
+   ```bash
+   STORE=$(python3 <review-kit>/bin/review.py store --repo .)
+   python3 <review-kit>/bin/review.py audit --repo . --access-log $STORE/access.jsonl --list-agents
+   ```
+
+   The subagent's id must be listed, with the file among the paths it read.
+4. Write a findings file declaring that file in `scope.files_read`, and check it:
+
+   ```bash
+   python3 <review-kit>/bin/review.py audit --repo . --access-log $STORE/access.jsonl \
+       --findings <file> --agent <id> --since <a time just before step 2>
+   ```
+
+   It must exit 0.
 
 If step 3 lists no subagent id, or the file is missing, the hook is not seeing what the kit
 assumes it sees, and `audit` cannot be trusted until that is understood.

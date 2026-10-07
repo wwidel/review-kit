@@ -52,6 +52,7 @@ so the decision to spend five agents on a review stays with whoever is paying fo
 
 ## Install
 
+You need Python 3.10 or newer, and nothing else: the scripts use only the standard library.
 Clone the kit somewhere, then point it at a repository:
 
 ```bash

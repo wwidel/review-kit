@@ -6,7 +6,7 @@ schema validation, scope-honesty checking, stable fingerprints, clustering candi
 recurrence matching, summary rendering and the ledger. Agents find defects, verify
 defects and decide fixes; this script does the rest.
 
-Stdlib only. Python 3.8+.
+Stdlib only. Python 3.10+.
 """
 from __future__ import annotations
 
@@ -2711,7 +2711,13 @@ def main():
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass
+    a = build_parser().parse_args()
+    a.fn(a)
 
+
+def build_parser():
+    """The command line, separate from main so the tests can check every documented command
+    against it without running anything."""
     ap = argparse.ArgumentParser(prog="review.py", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -2842,9 +2848,7 @@ def main():
                                      "reconciliation's run_id")
     p.add_argument("--run-id", help="override both")
     p.set_defaults(fn=cmd_ledger)
-
-    a = ap.parse_args()
-    a.fn(a)
+    return ap
 
 
 if __name__ == "__main__":
