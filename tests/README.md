@@ -7,7 +7,8 @@ uv run --no-project --python 3.10 --with pytest python -m pytest tests -q   # th
 
 Every test runs against its own temporary git repository and its own temporary `HOME`, with
 no global or system git config. Nothing here reads or writes your real `~/.review-kit` or
-`~/.claude`. The fixtures are in `conftest.py`.
+`~/.claude`. The fixtures are in `conftest.py`. `.github/workflows/tests.yml` runs the suite on
+Ubuntu and macOS with Python 3.10 and 3.14.
 
 ## What these tests cannot check
 

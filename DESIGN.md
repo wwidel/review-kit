@@ -244,8 +244,9 @@ what gives you figures for *your* repository, and those do have a source.
   created inside a directory that was already untracked or ignored — a `.pytest_cache/` left
   by an earlier run, a new file in `.venv/` — does not show, and nor does an edit to an
   existing ignored file, which is not hashed. Outside a git repository it does not run.
-- **The bookkeeping's test suite is new and partial, and there is no CI yet.** `bin/` is
-  roughly 3,650 lines of Python, and the section above argues that every failure this kit has
-  had came from that half rather than from the judgement half. Until recently every
-  regression in it was caught by running a review; `tests/` is where that is changing.
+- **The tests check the bookkeeping, not the judgement, and not Claude Code.** `tests/` covers
+  the scripts in `bin/`, and `.github/workflows/tests.yml` runs it on Ubuntu and macOS with
+  Python 3.10 and 3.14. It cannot check what reviewers or the reconciler conclude, and it feeds
+  the hook hand-built payloads, so a change in what Claude Code sends would pass it; the live
+  check in `tests/README.md` is the guard against that.
 - **Nothing measures whether a *confirmation* was earned** — only whether a refutation was.

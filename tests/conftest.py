@@ -26,6 +26,14 @@ def load(name):
     return mod
 
 
+@pytest.fixture
+def tmp_path(tmp_path):
+    """pytest's tmp_path with symlinks resolved. On macOS it lives under /var, a link to
+    /private/var, and the kit reports resolved paths; comparing the two spellings would fail
+    there and nowhere else."""
+    return tmp_path.resolve()
+
+
 @pytest.fixture(autouse=True)
 def home(tmp_path, monkeypatch):
     """Every test, whether it asks for this or not: a temporary HOME, and no git config from
