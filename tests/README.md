@@ -18,13 +18,15 @@ is what the live check below is for.
 
 ## Live check before a release
 
-About five minutes, in a fresh Claude Code session:
+About five minutes, in a fresh Claude Code session (a headless `claude -p` session works too):
 
 1. Make a scratch git repository with a `src/` directory and a file in it, and install the kit
    for it: `python3 <review-kit>/bin/install.py --repo <scratch>`. If the session was already
    running when the hook was installed, open `/hooks` once or restart the session.
-2. Start a session in the scratch repository's root and ask it to spawn one subagent that runs
-   `cd src`, then reads the file there with the Read tool and with `cat`.
+2. Start a session in the scratch repository's root and ask it to spawn one subagent that reads
+   the file with the Read tool, and runs `cd src && cat <file>` as a single Bash call. Claude Code
+   does not carry the working directory from one Bash call to the next, so a `cd` in a call of its
+   own leaves the next call's `cat` in the root, where it fails and reads nothing.
 3. In a shell in the scratch repository, list the agents the log saw:
 
    ```bash
@@ -40,7 +42,8 @@ About five minutes, in a fresh Claude Code session:
        --findings <file> --agent <id> --since <a time just before step 2>
    ```
 
-   It must exit 0.
+   It must exit 0. Add a tracked file the subagent never read to `scope.files_read` and run it
+   again: it must now exit 1 and name that file as an UNSUPPORTED CLAIM.
 
 If step 3 lists no subagent id, or the file is missing, the hook is not seeing what the kit
 assumes it sees, and `audit` cannot be trusted until that is understood.

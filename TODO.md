@@ -41,7 +41,9 @@ Claude Code sends something different, all tests still pass and the live log sil
 
 What is already known: on Claude Code 2.1.288 a subagent's records carried its own `agent_id`,
 and the hook ran in the session's current directory (seen in the Solution E run's access log and
-transcript). That is one version and one field.
+transcript). That is one version and one field. On 2.1.289 (the live check, 2026-10-10, headless)
+the same held for two subagents, which got different ids, and the Read and Bash payloads gave
+paths that resolved to the right file; the payloads themselves were not captured.
 
 ### What to do
 
@@ -68,9 +70,10 @@ No global settings are needed: a project-level hook in a scratch repository is e
 3. Start a **fresh** Claude Code session in `/tmp/payload-capture` (a hook added mid-session
    may not fire until restart) and ask it to:
    - Read `a.py` itself (main session);
-   - spawn one subagent that: runs `cd src`, Reads `m.py` by relative path, runs `cat m.py`,
-     Greps for `y`, Globs `*.py`, Edits `m.py`, Writes a new file, and edits `nb.ipynb` with
-     NotebookEdit;
+   - spawn one subagent that: runs `cd src && cat m.py` as one Bash call (the working
+     directory does not carry from one Bash call to the next, as of 2.1.289), Reads `src/m.py`
+     (by relative path, if the tool accepts one), Greps for `y`, Globs `*.py`, Edits `m.py`,
+     Writes a new file, and edits `nb.ipynb` with NotebookEdit;
    - spawn a second subagent that Reads `a.py` (to confirm two subagents get two ids).
 
    `claude -p "<the same instructions>"` in that directory works too, if an interactive session
@@ -93,7 +96,7 @@ No global settings are needed: a project-level hook in a scratch repository is e
      assert the record: the right absolute paths, the right agent id, `cmd`/`cwd`/`reads` on
      Bash records, nothing logged for Grep/Glob `path`;
    - assert the two subagents' ids differ from each other and from the main session's;
-   - assert the relative Read and the `cat` after `cd src` both resolve to `src/m.py`;
+   - assert the Read and the `cd src && cat m.py` both resolve to `src/m.py`;
    - feed the subagent's records to `audit` with a findings file declaring `src/m.py` and
      `a.py`, and assert the exit codes (0 for the subagent that read them; Write/Edit records
      must not count).
@@ -247,6 +250,8 @@ planted and original) is in the region of 40–50M. Run the first pass, then dec
   1.85M before a run that exhausted a weekly limit. README's WARNING lists a private 20,259-line
   repository whose estimate was ~1.8M and whose full audit cost ~3.5M. If these are the same
   repository (27,398 total lines, 20,259 reviewable), say so in DESIGN.md.
-- **Release live check.** `tests/README.md` describes a five-minute manual check of the hook in
-  a real session. It has not been run against the rewritten hook (the walk-up from the payload
-  `cwd`, the new parser). Run it once before teammates install.
+- **Release live check: an interactive run.** The check in `tests/README.md` passed on Claude
+  Code 2.1.289 on 2026-10-10, against the rewritten hook, in two headless `claude -p` sessions:
+  each subagent's Read and `cd src && cat m.py` were logged under its own id and resolved to
+  `src/m.py`, `audit` exited 0 for the declared file and 1 for a file never read. It has not been
+  run in an interactive session; do that once before teammates install.
