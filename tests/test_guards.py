@@ -1,4 +1,5 @@
 """validate's rules, residue's cases and preflight's refusals (plan section 7)."""
+import errno
 import json
 import os
 
@@ -166,7 +167,12 @@ def test_residue_names_what_changed(repo, snap, change, expect):
 
 
 def test_residue_survives_a_non_utf8_file_name(repo, snap):
-    (repo / os.fsdecode(b"bad-\xff.txt")).write_text("x\n")
+    try:
+        (repo / os.fsdecode(b"bad-\xff.txt")).write_text("x\n")
+    except OSError as e:
+        if e.errno != errno.EILSEQ:
+            raise
+        pytest.skip("this file system refuses non-UTF-8 names (macOS APFS), so the case cannot arise")
     r = residue(repo, snap)
     assert r.returncode == 1 and "Traceback" not in r.stderr
 
