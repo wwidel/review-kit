@@ -7,9 +7,9 @@ history beyond what is committed.
 Before anything else, on the new machine:
 
 ```bash
-git clone https://github.com/wwidel/review-kit.git && cd review-kit && git checkout test-suite
+git clone https://github.com/wwidel/review-kit.git && cd review-kit
 python3 -m pip install pytest
-python3 -m pytest tests -q                    # expect all to pass; ~20 s on an idle machine
+python3 -m pytest tests -q                    # expect all to pass; under a minute
 ```
 
 ---
@@ -243,9 +243,6 @@ planted and original) is in the region of 40–50M. Run the first pass, then dec
 
 ## 3. Smaller open items
 
-- **CI on macOS.** `.github/workflows/tests.yml` runs on Ubuntu and macOS with Python 3.10 and
-  3.14, and has not yet run. If macOS passes, update README's WARNING ("Tested on Linux and WSL
-  only") to say what CI covers; if it fails, fix or document.
 - **The 27,398-line repository.** DESIGN.md says `estimate` priced a 27,398-line repository at
   1.85M before a run that exhausted a weekly limit. README's WARNING lists a private 20,259-line
   repository whose estimate was ~1.8M and whose full audit cost ~3.5M. If these are the same
@@ -253,5 +250,3 @@ planted and original) is in the region of 40–50M. Run the first pass, then dec
 - **Release live check.** `tests/README.md` describes a five-minute manual check of the hook in
   a real session. It has not been run against the rewritten hook (the walk-up from the payload
   `cwd`, the new parser). Run it once before teammates install.
-- **Merge.** All of this is on branch `test-suite`; merge to `main` once the suite passes on the
-  new machine and CI.

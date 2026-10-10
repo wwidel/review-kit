@@ -33,9 +33,10 @@ repositories: for the 20,259-line one it came to about 1.8M, against ~3.5M actua
 the formula to the line count too, and go by the larger of the two. To spend less, use
 `--since <ref>` or run one single-purpose skill (see [Run](#run)).
 
-**Tested on Linux and WSL only.** macOS has not been tried. `review.py machine` reads memory
-from `/proc/meminfo`, so on a Mac it reports no memory figure and the compute-budget check has
-less to go on. Native Windows does not work: `machine` calls `os.statvfs`, which Windows lacks.
+**Used on Linux and WSL only.** The test suite passes on Ubuntu and macOS (CI, Python 3.10 and
+3.14), but no real audit has been run on a Mac. `review.py machine` reads memory from
+`/proc/meminfo`, so on a Mac it reports no memory figure and the compute-budget check has less
+to go on. Native Windows does not work: `machine` calls `os.statvfs`, which Windows lacks.
 
 ## What it is
 
