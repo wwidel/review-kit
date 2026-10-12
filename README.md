@@ -146,6 +146,7 @@ overwritten by an install.
 | [`PRACTICES.md`](PRACTICES.md) | the rule vocabulary findings cite, and an optional default standard |
 | [`FINDINGS.md`](FINDINGS.md) | the JSON contract every reviewer emits |
 | `REVIEW-RULES.template.md` | copied into your repo by `--with-rules`; yours to edit |
+| [`LICENSE`](LICENSE) | 0BSD: use, copy, modify and distribute it for any purpose, no conditions |
 
 ## Keeping the kit's checkout
 
@@ -369,6 +370,7 @@ review-kit/
   CLAUDE.md.snippet                 working rules to paste into a project CLAUDE.md
   REVIEW-RULES.template.md          copied into a repo by install.py --with-rules; the
                                     repo then owns it — what you adopted, what you declined
+  LICENSE                           0BSD: do anything with it, no conditions
   bin/
     review.py                       all the bookkeeping: scope, probe, validate, cluster,
                                     coverage, carryover, summarize, ledger
