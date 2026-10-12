@@ -6,32 +6,41 @@
 so far:
 
 ```
-tokens ≈ 700k + 140 × reviewable lines
+tokens ≈ 520k + 145 × reviewable lines
 ```
 
-**This is a very rough approximation, not a price.** It is a line drawn through the smallest
-and largest of five completed audits, not a statistical fit, and one of the five landed a third
-away from it. The per-line term rests almost entirely on the one large audit. What a repository
-costs depends on more than its size, and a repository unlike these five may land further off,
-in either direction. Budget for more than it says.
+**This is a very rough approximation, not a price.** It is a least-squares line through the six
+audits in the table below, and it lands within about 15% of each of them, in both directions.
+But the per-line term rests almost entirely on the one large audit: had that cost 3.0M or 4.0M
+instead of ~3.5M, the slope would be 120 or 174. The six were not measured in the same way
+either (see the note under the table). What a repository costs depends on more than its size,
+and a repository unlike these may land further off, in either direction. Budget for more than it
+says.
 
 Small repositories cost close to the fixed part, because the protocol itself is expensive;
 large ones are dominated by the source being read, re-read and verified. A single audit can use
 up a weekly usage limit, and one already has.
 
-| repository | reviewable lines | actual total | formula |
+| repository | reviewable lines | measured | formula |
 |---|---:|---:|---:|
-| Solution B | 1,397 | ~0.90M | 0.90M |
-| Solution C | 2,921 | ~1.04M | 1.11M |
-| Solution D | 3,719 | ~1.13M | 1.22M |
-| Solution E | 4,760 | ~1.04M | 1.37M |
-| a private repository | 20,259 | ~3.5M | 3.54M |
+| Solution A | 693 | 0.53M | 0.62M |
+| Solution B | 1,397 | 0.80M | 0.72M |
+| Solution C | 2,921 | 1.09M | 0.94M |
+| Solution D | 3,744 | 1.04M | 1.06M |
+| Solution E | 4,794 | 1.10M | 1.22M |
+| a private repository | 20,259 | ~3.5M | 3.46M |
+
+The Kaggle rows are from 2026-10-12: the tokens of the four reviewers and the reconciler, as
+the harness reported them when each finished. The orchestrating session's own tokens were not
+measured and are not included. The private repository's figure is from an earlier version of
+the kit.
 
 Before it spawns any reviewer, `/repo-audit` shows `review.py estimate`'s reviewable line count
-and token figure, and stops for your go-ahead. That token figure can run low on large
-repositories: for the 20,259-line one it came to about 1.8M, against ~3.5M actually spent. Apply
-the formula to the line count too, and go by the larger of the two. To spend less, use
-`--since <ref>` or run one single-purpose skill (see [Run](#run)).
+and token figure, and stops for your go-ahead. On four of the five Kaggle audits that figure
+came within 15% of the measured total, and it overestimated the smallest, Solution A, by 61%. It can
+run low on large repositories: for the 20,259-line one it came to about 1.8M, against ~3.5M
+actually spent. Apply the formula to the line count too, and go by the larger of the two. To
+spend less, use `--since <ref>` or run one single-purpose skill (see [Run](#run)).
 
 **Used on Linux and WSL only.** The test suite passes on Ubuntu and macOS (CI, Python 3.10 and
 3.14), but no real audit has been run on a Mac. `review.py machine` reads memory from
@@ -43,8 +52,8 @@ to go on. Native Windows does not work: `machine` calls `os.statvfs`, which Wind
 A review system for Python repositories built around data analysis and machine learning. Four
 independent reviewers — one of them blinded to the documentation — then a reconciler that does
 not trust any of them. For what it finds in practice, see
-[KAGGLE-RESULTS.md](KAGGLE-RESULTS.md): the kit is being re-run on five gold-medal Kaggle
-solutions, and their results will be added there.
+[KAGGLE-RESULTS.md](KAGGLE-RESULTS.md): 189 confirmed defects in five gold-medal Kaggle
+solutions.
 
 **Everything here is invoked by a person.** Nothing schedules itself, nothing hooks into git,
 and no agent decides on its own that a review is due. Agents are unreliable at doing things
@@ -124,7 +133,7 @@ overwritten by an install.
 |---|---|
 | `README.md` | this — install, run, the commands |
 | [`DESIGN.md`](DESIGN.md) | how it works, why, what has been measured, known limits |
-| [`KAGGLE-RESULTS.md`](KAGGLE-RESULTS.md) | what it finds in five gold-medal Kaggle solutions (re-audit pending) |
+| [`KAGGLE-RESULTS.md`](KAGGLE-RESULTS.md) | what it found in five gold-medal Kaggle solutions |
 | [`PRACTICES.md`](PRACTICES.md) | the rule vocabulary findings cite, and an optional default standard |
 | [`FINDINGS.md`](FINDINGS.md) | the JSON contract every reviewer emits |
 | `REVIEW-RULES.template.md` | copied into your repo by `--with-rules`; yours to edit |
@@ -253,7 +262,7 @@ compute budget measured before anything runs, so heavy work is flagged rather th
 and a reconciler that re-runs, re-reads and re-derives instead of summarising.
 
 DESIGN.md also carries what has been measured: ten planted false findings, all ten refuted; a
-repeat run putting an upper bound on the miss rate; and the cost, roughly 700k tokens plus 140
+repeat run putting an upper bound on the miss rate; and the cost, roughly 520k tokens plus 145
 per reviewable line (see [WARNING](#warning)).
 
 ## Practices — adopting them, or not
@@ -344,7 +353,7 @@ Four rules do most of the work in this repo class:
 review-kit/
   README.md                         this — install, run, the commands
   DESIGN.md                         how it works, why, what has been measured, known limits
-  KAGGLE-RESULTS.md                 what it finds in five gold-medal Kaggle solutions
+  KAGGLE-RESULTS.md                 what it found in five gold-medal Kaggle solutions
   PRACTICES.md                      portable rules, with stable IDs reviewers cite
   FINDINGS.md                       the JSON contract every reviewer emits
   CLAUDE.md.snippet                 working rules to paste into a project CLAUDE.md

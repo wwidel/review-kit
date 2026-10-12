@@ -166,13 +166,16 @@ against it. It is a bookmark, not a timer: nothing reads its age and decides to 
 
 ### Cost
 
-A full audit costs roughly **700k tokens plus 140 per reviewable line**. That is a line drawn
-through the smallest and largest of five completed audits (1,397 lines and ~0.9M; 20,259 lines
-and ~3.5M), not a statistical fit, and its slope rests almost entirely on the large one. It is a
-very rough approximation: one of the five landed a third away from it. The README's WARNING has
-the table. At a few thousand lines the fixed protocol cost dominates: a 1,400-line repository
-cost 80% of what a 3,700-line one did. Trimming the preamble will not rescue this, because the
-preamble is ~18k of a reviewer's ~145k floor.
+A full audit costs roughly **520k tokens plus 145 per reviewable line**. That is a least-squares
+line through six completed audits: five public Kaggle solutions (693 to 4,794 lines, 0.53M to
+1.10M, re-run on 2026-10-12) and one private repository (20,259 lines, ~3.5M, on an earlier
+version of the kit). It replaces 700k + 140, a line drawn through the smallest and largest of
+the first five audits. It lands within about 15% of each of the six, but its slope rests almost
+entirely on the large one, and the Kaggle figures leave out the orchestrating session's own
+tokens. It is a very rough approximation. The README's WARNING has the table. At a few thousand
+lines the fixed protocol cost dominates: a 1,400-line repository cost 77% of what a 3,700-line
+one did. Trimming the preamble will not rescue this, because the preamble is ~18k of a
+reviewer's ~145k floor.
 
 Past that size the repository takes over. The 20,259-line audit cost ~3.5M, about twice what
 `review.py estimate` would have priced it at. `estimate` charges each reviewer its floor plus
@@ -194,9 +197,10 @@ rather than all of them, and the run resumes by skipping whatever already valida
 Every figure above was measured once, by hand. The miss rate and refutation rate come from the
 transcripts of the development runs on three Kaggle repositories: two consecutive reviews of one
 repository, and a controlled injection of ten fabricated findings. The cost formula comes from
-the actual token totals of five completed audits: four public Kaggle solutions and one private
-repository, run on more than one machine. **None of them has a script in this repository that
-reproduces it**, and the runs themselves were not kept. They are recorded here because a rough,
+the token totals of six completed audits: five public Kaggle solutions, each run's per-agent
+counts recorded in the Cost section of its `REVIEW-SUMMARY.md`, and one private repository run
+earlier. **None of them has a script in this repository that reproduces it**, and the runs
+themselves are not in this repository. They are recorded here because a rough,
 honestly-labelled figure is more useful than silence about cost, and they should be read as
 one-off observations rather than as measurements you can check.
 
