@@ -43,8 +43,8 @@ to go on. Native Windows does not work: `machine` calls `os.statvfs`, which Wind
 A review system for Python repositories built around data analysis and machine learning. Four
 independent reviewers — one of them blinded to the documentation — then a reconciler that does
 not trust any of them. For what it finds in practice, see
-[KAGGLE-RESULTS.md](KAGGLE-RESULTS.md): 211 confirmed defects in four prize-winning Kaggle
-solutions.
+[KAGGLE-RESULTS.md](KAGGLE-RESULTS.md): the kit is being re-run on five gold-medal Kaggle
+solutions, and their results will be added there.
 
 **Everything here is invoked by a person.** Nothing schedules itself, nothing hooks into git,
 and no agent decides on its own that a review is due. Agents are unreliable at doing things
@@ -124,7 +124,7 @@ overwritten by an install.
 |---|---|
 | `README.md` | this — install, run, the commands |
 | [`DESIGN.md`](DESIGN.md) | how it works, why, what has been measured, known limits |
-| [`KAGGLE-RESULTS.md`](KAGGLE-RESULTS.md) | what it found in four prize-winning Kaggle solutions |
+| [`KAGGLE-RESULTS.md`](KAGGLE-RESULTS.md) | what it finds in five gold-medal Kaggle solutions (re-audit pending) |
 | [`PRACTICES.md`](PRACTICES.md) | the rule vocabulary findings cite, and an optional default standard |
 | [`FINDINGS.md`](FINDINGS.md) | the JSON contract every reviewer emits |
 | `REVIEW-RULES.template.md` | copied into your repo by `--with-rules`; yours to edit |
@@ -344,7 +344,7 @@ Four rules do most of the work in this repo class:
 review-kit/
   README.md                         this — install, run, the commands
   DESIGN.md                         how it works, why, what has been measured, known limits
-  KAGGLE-RESULTS.md                 what it found in four prize-winning Kaggle solutions
+  KAGGLE-RESULTS.md                 what it finds in five gold-medal Kaggle solutions
   PRACTICES.md                      portable rules, with stable IDs reviewers cite
   FINDINGS.md                       the JSON contract every reviewer emits
   CLAUDE.md.snippet                 working rules to paste into a project CLAUDE.md
