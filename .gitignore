@@ -10,3 +10,6 @@ venv/
 
 # Copied into a repo by install.py --with-rules; it is the repo's file, not the kit's.
 REVIEW-RULES.md
+
+# Local planning notes, not part of the kit.
+TODO.md
