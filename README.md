@@ -3,44 +3,53 @@
 ## WARNING
 
 **A full audit is expensive, and its cost can only be guessed very roughly.** The best guess
-so far:
+so far, for the *new* tokens an audit sends the model:
 
 ```
-tokens ≈ 520k + 145 × reviewable lines
+new tokens ≈ 520k + 145 × reviewable lines
 ```
 
-**This is a very rough approximation, not a price.** It is a least-squares line through the six
-audits in the table below, and it lands within about 15% of each of them, in both directions.
-But the per-line term rests almost entirely on the one large audit: had that cost 3.0M or 4.0M
-instead of ~3.5M, the slope would be 120 or 174. The six were not measured in the same way
-either (see the note under the table). What a repository costs depends on more than its size,
-and a repository unlike these may land further off, in either direction. Budget for more than it
-says.
+**That is not what an audit costs you.** New tokens are the uncached input, the cache writes and
+the output. Every agent also re-sends its whole context on each call, and those cache reads are
+93–96% of everything an audit processes: 8–27M tokens for the five Kaggle audits below, against
+0.5–1.1M new. On the API a cache read costs a tenth of the input price or less. Claude Code
+counts cache reads toward plan usage "at the cached token rate", but Anthropic does not publish
+that rate for Pro and Max plans. Priced like the API, the five audits cost about two to four
+times their new tokens, and the larger the repository, the larger the multiple. Until an audit
+has been measured with `/usage`, assume it draws two to four times what the formula says, and
+that one audit can use up a weekly limit: one already has.
 
-Small repositories cost close to the fixed part, because the protocol itself is expensive;
-large ones are dominated by the source being read, re-read and verified. A single audit can use
-up a weekly usage limit, and one already has.
+**The formula itself is a very rough approximation.** It is a least-squares line through the six
+audits in the table, within about 15% of each. But the per-line term rests almost entirely on
+the one large audit: had that cost 3.0M or 4.0M instead of ~3.5M, the slope would be 120 or
+174. What a repository costs depends on more than its size, and a repository unlike these may
+land further off, in either direction. Small repositories cost close to the fixed part, because
+the protocol itself is expensive; large ones are dominated by the source being read, re-read
+and verified.
 
-| repository | reviewable lines | measured | formula |
-|---|---:|---:|---:|
-| Solution A | 693 | 0.53M | 0.62M |
-| Solution B | 1,397 | 0.80M | 0.72M |
-| Solution C | 2,921 | 1.09M | 0.94M |
-| Solution D | 3,744 | 1.04M | 1.06M |
-| Solution E | 4,794 | 1.10M | 1.22M |
-| a private repository | 20,259 | ~3.5M | 3.46M |
+| repository | reviewable lines | new tokens | formula | all tokens processed | at API prices, × new |
+|---|---:|---:|---:|---:|---:|
+| Solution A | 693 | 0.53M | 0.62M | 8.4M | 1.9–2.7 |
+| Solution B | 1,397 | 0.80M | 0.72M | 12.0M | 1.9–2.6 |
+| Solution C | 2,921 | 1.09M | 0.94M | 24.6M | 2.4–3.4 |
+| Solution D | 3,744 | 1.04M | 1.06M | 26.9M | 2.5–3.7 |
+| Solution E | 4,794 | 1.10M | 1.22M | 25.1M | 2.3–3.4 |
+| a private repository | 20,259 | ~3.5M | 3.46M | — | — |
 
-The Kaggle rows are from 2026-10-12: the tokens of the four reviewers and the reconciler, as
-the harness reported them when each finished. The orchestrating session's own tokens were not
-measured and are not included. The private repository's figure is from an earlier version of
-the kit.
+The Kaggle rows are from 2026-10-12. *New tokens* is the sum of the harness's figure for each of
+the five agents (four reviewers and the reconciler). That figure is the agent's final context
+size, which matches the new tokens it processed to within a few percent. *All tokens processed*
+counts every API call of those five agents and of the session that ran them, from their
+transcripts. *At API prices* weights cache reads at 0.05× to 0.1× the input price and cache
+writes at 1.25×. The private repository's figure is from an earlier version of the kit, and is
+believed to be the same kind of figure as *new tokens*; nothing else about it is known.
 
 Before it spawns any reviewer, `/repo-audit` shows `review.py estimate`'s reviewable line count
-and token figure, and stops for your go-ahead. On four of the five Kaggle audits that figure
-came within 15% of the measured total, and it overestimated the smallest, Solution A, by 61%. It can
-run low on large repositories: for the 20,259-line one it came to about 1.8M, against ~3.5M
-actually spent. Apply the formula to the line count too, and go by the larger of the two. To
-spend less, use `--since <ref>` or run one single-purpose skill (see [Run](#run)).
+and token figure, and stops for your go-ahead. Like the formula, that figure counts new tokens
+only. On four of the five Kaggle audits it came within 15% of them, and it overestimated the
+smallest, Solution A, by 61%. It can run low on large repositories: for the 20,259-line one it came to
+about 1.8M, against ~3.5M. Apply the formula to the line count too, and go by the larger of the
+two. To spend less, use `--since <ref>` or run one single-purpose skill (see [Run](#run)).
 
 **Used on Linux and WSL only.** The test suite passes on Ubuntu and macOS (CI, Python 3.10 and
 3.14), but no real audit has been run on a Mac. `review.py machine` reads memory from
@@ -262,8 +271,9 @@ compute budget measured before anything runs, so heavy work is flagged rather th
 and a reconciler that re-runs, re-reads and re-derives instead of summarising.
 
 DESIGN.md also carries what has been measured: ten planted false findings, all ten refuted; a
-repeat run putting an upper bound on the miss rate; and the cost, roughly 520k tokens plus 145
-per reviewable line (see [WARNING](#warning)).
+repeat run putting an upper bound on the miss rate; and the cost, roughly 520k new tokens plus
+145 per reviewable line, and two to four times that priced like the API (see
+[WARNING](#warning)).
 
 ## Practices — adopting them, or not
 

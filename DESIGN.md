@@ -166,16 +166,17 @@ against it. It is a bookmark, not a timer: nothing reads its age and decides to 
 
 ### Cost
 
-A full audit costs roughly **520k tokens plus 145 per reviewable line**. That is a least-squares
-line through six completed audits: five public Kaggle solutions (693 to 4,794 lines, 0.53M to
-1.10M, re-run on 2026-10-12) and one private repository (20,259 lines, ~3.5M, on an earlier
-version of the kit). It replaces 700k + 140, a line drawn through the smallest and largest of
-the first five audits. It lands within about 15% of each of the six, but its slope rests almost
-entirely on the large one, and the Kaggle figures leave out the orchestrating session's own
-tokens. It is a very rough approximation. The README's WARNING has the table. At a few thousand
-lines the fixed protocol cost dominates: a 1,400-line repository cost 77% of what a 3,700-line
-one did. Trimming the preamble will not rescue this, because the preamble is ~18k of a
-reviewer's ~145k floor.
+A full audit sends the model roughly **520k new tokens plus 145 per reviewable line**. That is a
+least-squares line through six completed audits: five public Kaggle solutions (693 to 4,794
+lines, 0.53M to 1.10M, re-run on 2026-10-12) and one private repository (20,259 lines, ~3.5M, on
+an earlier version of the kit). It replaces 700k + 140, a line drawn through the smallest and
+largest of the first five audits. It lands within about 15% of each of the six, but its slope
+rests almost entirely on the large one, and the Kaggle figures leave out the orchestrating
+session's own tokens. It is a very rough approximation, and it leaves out cache reads, the
+93–96% of an audit's tokens that are each agent re-reading its own context; the README's WARNING
+says what that means for cost, and has the table. At a few thousand lines the fixed protocol
+cost dominates: a 1,400-line repository cost 77% of what a 3,700-line one did. Trimming the
+preamble will not rescue this, because the preamble is ~18k of a reviewer's ~145k floor.
 
 Past that size the repository takes over. The 20,259-line audit cost ~3.5M, about twice what
 `review.py estimate` would have priced it at. `estimate` charges each reviewer its floor plus
