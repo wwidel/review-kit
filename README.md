@@ -47,9 +47,10 @@ believed to be the same kind of figure as *new tokens*; nothing else about it is
 Before it spawns any reviewer, `/repo-audit` shows `review.py estimate`'s reviewable line count
 and token figure, and stops for your go-ahead. Like the formula, that figure counts new tokens
 only. On four of the five Kaggle audits it came within 15% of them, and it overestimated the
-smallest, Solution A, by 61%. It can run low on large repositories: for the 20,259-line one it came to
-about 1.8M, against ~3.5M. Apply the formula to the line count too, and go by the larger of the
-two. To spend less, use `--since <ref>` or run one single-purpose skill (see [Run](#run)).
+smallest, Solution A, by 61%. It can run low on large repositories: for the 20,259-line one it
+came to about 1.8M, against ~3.5M. Apply the formula to the line count too, and go by the larger
+of the two. To spend less, use `--since <ref>` or run one single-purpose skill (see
+[Run](#run)).
 
 **Used on Linux and WSL only.** The test suite passes on Ubuntu and macOS (CI, Python 3.10 and
 3.14), but no real audit has been run on a Mac. `review.py machine` reads memory from
@@ -61,8 +62,8 @@ to go on. Native Windows does not work: `machine` calls `os.statvfs`, which Wind
 A review system for Python repositories built around data analysis and machine learning. Four
 independent reviewers — one of them blinded to the documentation — then a reconciler that does
 not trust any of them. For what it finds in practice, see
-[KAGGLE-RESULTS.md](KAGGLE-RESULTS.md): 189 confirmed defects in five gold-medal Kaggle
-solutions.
+[KAGGLE-RESULTS.md](KAGGLE-RESULTS.md): 189 confirmed defects in five top-3 and gold-medal
+Kaggle solutions.
 
 **Everything here is invoked by a person.** Nothing schedules itself, nothing hooks into git,
 and no agent decides on its own that a review is due. Agents are unreliable at doing things
@@ -142,7 +143,7 @@ overwritten by an install.
 |---|---|
 | `README.md` | this — install, run, the commands |
 | [`DESIGN.md`](DESIGN.md) | how it works, why, what has been measured, known limits |
-| [`KAGGLE-RESULTS.md`](KAGGLE-RESULTS.md) | what it found in five gold-medal Kaggle solutions |
+| [`KAGGLE-RESULTS.md`](KAGGLE-RESULTS.md) | what it found in five top-3 and gold-medal Kaggle solutions |
 | [`PRACTICES.md`](PRACTICES.md) | the rule vocabulary findings cite, and an optional default standard |
 | [`FINDINGS.md`](FINDINGS.md) | the JSON contract every reviewer emits |
 | `REVIEW-RULES.template.md` | copied into your repo by `--with-rules`; yours to edit |
@@ -364,7 +365,7 @@ Four rules do most of the work in this repo class:
 review-kit/
   README.md                         this — install, run, the commands
   DESIGN.md                         how it works, why, what has been measured, known limits
-  KAGGLE-RESULTS.md                 what it found in five gold-medal Kaggle solutions
+  KAGGLE-RESULTS.md                 what it found in five top-3 and gold-medal Kaggle solutions
   PRACTICES.md                      portable rules, with stable IDs reviewers cite
   FINDINGS.md                       the JSON contract every reviewer emits
   CLAUDE.md.snippet                 working rules to paste into a project CLAUDE.md
