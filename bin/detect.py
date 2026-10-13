@@ -1203,9 +1203,10 @@ def detect_cannot_run(r):
         if not (star or dynamic):
             bound = _bound_names(f.tree)
             seen = set()
-            for n in ast.walk(f.tree):
-                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and \
-                        n.id not in bound and n.id not in BUILTINS and n.id not in seen:
+            loads = sorted((n for n in ast.walk(f.tree) if isinstance(n, ast.Name) and
+                            isinstance(n.ctx, ast.Load)), key=lambda n: (n.lineno, n.col_offset))
+            for n in loads:      # by position: each name is reported where it is first used
+                if n.id not in bound and n.id not in BUILTINS and n.id not in seen:
                     seen.add(n.id)
                     hits.append(Hit("cannot-run", "undefined-name", f.rel, n.lineno,
                                     f"{n.id!r} is used but never defined or imported in this "
@@ -1460,50 +1461,90 @@ SENT = {
 }
 
 
+SEVERITY_ORDER = {"critical": 0, "major": 1, "minor": 2, "trivial": 3}
+
+
+def _group(hits):
+    """Hits gathered into one list per distinct defect.
+
+    1. Hits of one kind in one file that say the same thing (the same unseeded call at two
+       lines) are one defect with several sites.
+    2. All undefined names in one file are one defect: the file relies on names that some
+       other file or session defines, and naming each separately split one cause into many.
+    3. Groups from the same detector covering exactly the same lines are one defect seen two
+       ways: a vectorizer fitted on test data is also a vectorizer fitted twice.
+    """
+    groups = {}
+    for h in hits:
+        key = (h.kind, h.file) if h.kind == "undefined-name" else (
+            h.kind, h.file, re.sub(r"\b\d+\b", "#", h.message))
+        groups.setdefault(key, []).append(h)
+    merged = {}
+    for hs in groups.values():
+        lines = frozenset(h.line for h in hs)
+        merged.setdefault((hs[0].detector, hs[0].file, lines), []).extend(hs)
+    return list(merged.values())
+
+
+def _finding(n, hs, repo):
+    hs = sorted(hs, key=lambda h: (SEVERITY_ORDER[SENT[h.kind][0]], h.line))
+    first = hs[0]                       # the most severe kind leads
+    kinds = list(dict.fromkeys(h.kind for h in hs))
+    severity, fix, certainty, rule = SENT[first.kind]
+    lines = sorted({h.line for h in hs})
+    if kinds == ["undefined-name"]:
+        names = list(dict.fromkeys(re.match(r"'([^']+)'", h.message).group(1)
+                                   for h in sorted(hs, key=lambda h: h.line)))
+        claim = (f"{len(names)} name(s) used in this file are never defined or imported in it: "
+                 f"{', '.join(names)} — it can only run where something else defines them"
+                 if len(names) > 1 else first.message)
+    else:
+        claim = "; ".join(dict.fromkeys(h.message for h in hs if h.kind != first.kind or
+                                        h is first))
+        if len(lines) > 1:
+            claim += f" (lines {', '.join(map(str, lines))})"
+        if len(kinds) > 1:
+            fix = "; ".join(dict.fromkeys(SENT[k][1] for k in kinds))
+    quote = first.evidence
+    if (not quote or kinds == ["undefined-name"]) and repo is not None:
+        try:
+            quote = split_lines((Path(repo) / first.file).read_text(
+                encoding="utf-8-sig", errors="replace"))[first.line - 1].strip()
+        except (OSError, IndexError):
+            pass
+    return {
+        "id": f"static-{n:03d}", "rule_id": rule, "file": first.file, "line": lines[0],
+        "lines": ",".join(map(str, lines)), "claim": claim, "class": "defect",
+        "evidence": {"kind": "quote", "quote": quote or first.message},
+        # A detector's "high" means the pattern alone is the defect; "medium", that it often
+        # is. Neither is more than a claim the reconciler has yet to check.
+        "severity": severity,
+        "confidence": "likely" if any(h.confidence == "high" for h in hs) else "speculative",
+        "fix": fix, "fix_certainty": certainty if len(kinds) == 1 else "judgment",
+        "detector": first.detector, "detector_kind": first.kind,
+        **({"detector_kinds": kinds} if len(kinds) > 1 else {}),
+    }
+
+
 def to_findings(hits, manifest, run_id=None, repo=None):
-    """A findings document in the contract's shape, one finding per (kind, file).
+    """A findings document in the contract's shape, one finding per distinct defect.
 
     Only files in the manifest's review tier are reported, so a `--since` window holds; the
     detectors still read the whole repository, because a missing producer or an undefined
     name is decided by files outside the window.
     """
     review = {f["path"] for f in manifest.get("files", [])}
-    groups, held_back = {}, {}
+    sent, held_back = [], {}
     for h in hits:
         if h.file not in review:
             continue
         if h.kind not in SENT:
             held_back[h.kind] = held_back.get(h.kind, 0) + 1
             continue
-        # One finding per defect: hits of one kind in one file that say the same thing (the
-        # same unseeded call, the same undefined name) are one finding with several sites.
-        groups.setdefault((h.kind, h.file, re.sub(r"\b\d+\b", "#", h.message)), []).append(h)
-    findings = []
-    for n, ((kind, file, _), hs) in enumerate(sorted(groups.items(), key=lambda kv: (
-            kv[0][1], min(h.line for h in kv[1]), kv[0][0], kv[0][2])), 1):
-        hs = sorted(hs, key=lambda h: h.line)
-        first = hs[0]
-        severity, fix, certainty, rule = SENT[kind]
-        lines = sorted({h.line for h in hs})
-        quote = first.evidence
-        if not quote and repo is not None:
-            try:
-                quote = split_lines((Path(repo) / file).read_text(
-                    encoding="utf-8-sig", errors="replace"))[first.line - 1].strip()
-            except (OSError, IndexError):
-                quote = ""
-        claim = first.message + (f" (the same at line(s) {', '.join(map(str, lines[1:]))})"
-                                 if len(lines) > 1 else "")
-        findings.append({
-            "id": f"static-{n:03d}", "rule_id": rule, "file": file, "line": first.line,
-            "lines": ",".join(map(str, lines)), "claim": claim, "class": "defect",
-            "evidence": {"kind": "quote", "quote": quote or first.message},
-            # A detector's "high" means the pattern alone is the defect; "medium", that it often
-            # is. Neither is more than a claim the reconciler has yet to check.
-            "severity": severity,
-            "confidence": "likely" if first.confidence == "high" else "speculative", "fix": fix,
-            "fix_certainty": certainty, "detector": first.detector, "detector_kind": kind,
-        })
+        sent.append(h)
+    groups = sorted(_group(sent), key=lambda hs: (hs[0].file, min(h.line for h in hs),
+                                                   hs[0].kind, hs[0].message))
+    findings = [_finding(n, hs, repo) for n, hs in enumerate(groups, 1)]
     code = sorted(p for p in review if Path(p).suffix.lower() in CODE_EXT)
     return {
         "reviewer": STATIC_REVIEWER, "run_id": run_id,
@@ -1511,11 +1552,10 @@ def to_findings(hits, manifest, run_id=None, repo=None):
                   "files_in_scope": len(review), "files_read": code, "files_queried": []},
         "machine": {},
         "denominators": {"files_scanned": len(code), "hits": len(hits),
-                         "hits_in_scope": sum(len(v) for v in groups.values())
-                         + sum(held_back.values()),
+                         "hits_in_scope": len(sent) + sum(held_back.values()),
                          "held_back": sum(held_back.values()), "findings": len(findings)},
-        "sections_skipped": [{"section": kind, "reason": f"{n} hit(s) held back: imprecise on "
-                              "unseen code, so not sent as findings"}
+        "sections_skipped": [{"section": kind, "reason": f"{n} hit(s) of a kind that is "
+                              "counted but not sent as findings"}
                              for kind, n in sorted(held_back.items())],
         "not_reviewed": [{"path": p, "reason": "static checks read code only (.py, .R, .sh, "
                           "YAML)"} for p in sorted(review - set(code))],
@@ -1563,7 +1603,7 @@ def main():
         tmp.replace(out)
         d = doc["denominators"]
         print(f"static: {len(doc['findings'])} finding(s) from {d['hits_in_scope']} hit(s) in "
-              f"scope ({d['held_back']} held back as imprecise) -> {out}")
+              f"scope ({d['held_back']} of kinds counted but not sent) -> {out}")
         return
     by = {}
     for h in hits:

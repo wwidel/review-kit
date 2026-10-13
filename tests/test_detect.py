@@ -348,7 +348,7 @@ def test_one_finding_per_kind_and_file_and_imprecise_kinds_held_back(tmp_path):
     kinds_ = sorted((f["file"], f["detector_kind"]) for f in doc["findings"])
     assert kinds_ == [("a.py", "seedable-call-without-seed"), ("b.py", "yaml-load-without-loader")]
     seed = next(f for f in doc["findings"] if f["file"] == "a.py")
-    assert seed["lines"] == "2,3" and "the same at line(s) 3" in seed["claim"]
+    assert seed["lines"] == "2,3" and "(lines 2, 3)" in seed["claim"]
     assert doc["denominators"]["held_back"] == 1          # the unused parameter
     assert [s["section"] for s in doc["sections_skipped"]] == ["parameter-unused"]
 
@@ -617,7 +617,28 @@ def test_medium_hits_are_sent_as_speculative(tmp_path):
     assert f["detector_kind"] == "resample-before-split" and f["confidence"] == "speculative"
 
 
-def test_distinct_defects_of_one_kind_in_one_file_are_separate_findings(tmp_path):
+def test_undefined_names_in_one_file_are_one_finding(tmp_path):
     root, d, manifest, doc = static_findings(tmp_path, {
-        "a.py": "x = alpha + 1\ny = beta + 2\n"})
-    assert sorted(f["claim"].split("'")[1] for f in doc["findings"]) == ["alpha", "beta"]
+        "a.py": "x = alpha + 1\ny = beta + 2\nz = alpha\n", "b.py": "w = gamma\n"})
+    by_file = {f["file"]: f for f in doc["findings"]}
+    assert set(by_file) == {"a.py", "b.py"}
+    assert "alpha, beta" in by_file["a.py"]["claim"] and by_file["a.py"]["lines"] == "1,2"
+    assert by_file["b.py"]["claim"] == "'gamma' is used but never defined or imported in this file"
+
+
+def test_two_kinds_on_the_same_line_are_one_finding(tmp_path):
+    root, d, manifest, doc = static_findings(tmp_path, {
+        "a.py": "from sklearn.feature_extraction.text import TfidfVectorizer\n"
+                "train_qs, test_qs = [], []\n"
+                "v = TfidfVectorizer()\na = v.fit_transform(train_qs)\n"
+                "b = v.fit_transform(test_qs)\n"})
+    (f,) = doc["findings"]
+    assert sorted(f["detector_kinds"]) == ["fit-on-heldout", "refit-on-different-data"]
+    assert f["lines"] == "5" and "held-out" in f["claim"] and "again" in f["claim"]
+
+
+def test_distinct_messages_of_one_kind_stay_separate(tmp_path):
+    root, d, manifest, doc = static_findings(tmp_path, {
+        "a.py": "from sklearn.cluster import KMeans\nfrom sklearn.decomposition import "
+                "TruncatedSVD\nk = KMeans(3)\ns = TruncatedSVD(2)\n"})
+    assert len(doc["findings"]) == 2
