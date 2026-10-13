@@ -250,6 +250,8 @@ reconcile.
   machine├─▶ analysis ───┤  (one schema,           all four on Opus
          └─▶ docs ───────┘   evidence required)
                     │
+                    │◀── static checks (detect.py) ── findings-static.json, run after
+                    │                                  the reviewers so none sees it
                     ▼   validate · fingerprint · cluster · coverage   ← scripted gate
                     │
                     ▼
@@ -378,7 +380,8 @@ review-kit/
     log_file_access.py              PostToolUse hook backing `review.py audit`
     detect.py                       static detectors for specific defect patterns (unseeded
                                     randomness, fitting outside the fold, code that cannot
-                                    run, ...). Not yet wired into a review; run it by hand
+                                    run, ...); /repo-audit hands their precise hits to the
+                                    reconciler as a fifth findings file
     install.py                      puts the skills and the hook where they must be
   skills/
     repo-audit/SKILL.md             orchestrator — the entry point

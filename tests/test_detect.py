@@ -286,3 +286,77 @@ def test_a_worker_reading_a_global_set_only_under_main(tmp_path):
 def test_setwd_in_r(tmp_path):
     assert kinds(scan(tmp_path, {"a.R": "setwd('D:/kaggle/project')\n"}, "hard-coded-path")) == \
         ["absolute-path"]
+
+
+# ---------------------------------------------------------------- findings for a review
+
+def scoped(tmp_path, files):
+    """A committed repository and its scope manifest, as a run would have them."""
+    from conftest import git, run
+    import json
+    root = tmp_path / "proj"
+    for rel, text in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(textwrap.dedent(text))
+    git(root, "init", "-q")
+    git(root, "add", "-A")
+    git(root, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "c")
+    d = tmp_path / "run" / "R1"
+    d.mkdir(parents=True)
+    r = run("review.py", "scope", "--repo", root, "--out", d, cwd=root)
+    assert r.returncode == 0, r.stderr
+    return root, d, json.loads((d / "manifest.json").read_text())
+
+
+def static_findings(tmp_path, files):
+    import json
+    from conftest import run
+    root, d, manifest = scoped(tmp_path, files)
+    r = run("detect.py", "--manifest", d / "manifest.json", "--findings",
+            d / "findings-static.json", cwd=root)
+    assert r.returncode == 0, r.stderr
+    return root, d, manifest, json.loads((d / "findings-static.json").read_text())
+
+
+FILES = {
+    "a.py": "from sklearn.cluster import KMeans\nk1 = KMeans(3)\nk2 = KMeans(4)\n"
+            "def f(a, unused):\n    return a\n",
+    "b.py": "import yaml\nc = yaml.load(open('c.yml'))\n",
+    "README.md": "# p\n",
+}
+
+
+def test_the_findings_file_satisfies_the_contract(tmp_path):
+    root, d, manifest, doc = static_findings(tmp_path, FILES)
+    review = load("review")
+    assert review.validate_findings(doc, manifest, str(root)) == []
+    assert doc["reviewer"] == "static" and doc["run_id"] == "R1"
+    assert all(f["confidence"] == "likely" for f in doc["findings"])
+
+
+def test_one_finding_per_kind_and_file_and_imprecise_kinds_held_back(tmp_path):
+    root, d, manifest, doc = static_findings(tmp_path, FILES)
+    kinds_ = sorted((f["file"], f["detector_kind"]) for f in doc["findings"])
+    assert kinds_ == [("a.py", "seedable-call-without-seed"), ("b.py", "yaml-load-without-loader")]
+    seed = next(f for f in doc["findings"] if f["file"] == "a.py")
+    assert seed["lines"] == "2,3" and "1 more site" in seed["claim"]
+    assert doc["denominators"]["held_back"] == 1          # the unused parameter
+    assert [s["section"] for s in doc["sections_skipped"]] == ["parameter-unused"]
+
+
+def test_only_files_in_the_review_window_are_reported(tmp_path):
+    import json
+    from conftest import run
+    root, d, manifest = scoped(tmp_path, FILES)
+    manifest["files"] = [f for f in manifest["files"] if f["path"] != "b.py"]
+    (d / "manifest.json").write_text(json.dumps(manifest))
+    run("detect.py", "--manifest", d / "manifest.json", "--findings", d / "findings-static.json",
+        cwd=root)
+    doc = json.loads((d / "findings-static.json").read_text())
+    assert {f["file"] for f in doc["findings"]} == {"a.py"}
+
+
+def test_findings_needs_a_manifest(tmp_path):
+    from conftest import run
+    r = run("detect.py", "--repo", tmp_path, "--findings", tmp_path / "f.json")
+    assert r.returncode == 2 and "--manifest" in r.stderr

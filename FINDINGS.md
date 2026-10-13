@@ -72,6 +72,10 @@ your own output.
 }
 ```
 
+A fifth file in the same shape, `findings-static.json`, is written by `bin/detect.py` rather
+than by an agent: `reviewer` is `static`, every finding is `likely` with the quoted site as
+evidence, and two extra fields, `detector` and `detector_kind`, name the check that fired.
+
 ## Field rules
 
 **`rule_id`** — the rule this violates, or `null`. Three sources, in precedence order: a `P-`

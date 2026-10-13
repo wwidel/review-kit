@@ -267,7 +267,9 @@ The prompts, in shape — one per reviewer:
 > something, and never substitute a sample for the real run. Record what you deferred and what
 > it would need.
 > Write your findings JSON to `$STORE/runs/<RUN>/findings-code.json`. Print one line only.
-> Do not edit any file. Do not print your findings.
+> Do not edit any file. Do not print your findings. Do not open any other `findings-*.json` in
+> that directory: the other reviewers' files, and the static checks', are for the reconciler,
+> and reading one ends the independence your leg exists to provide.
 > `<file list>`
 
 …and the same for `review-analysis` → `findings-analysis.json` and `review-docs` →
@@ -311,6 +313,19 @@ is supposed to form independently. When each returns, harvest its file and let t
 first real run of this kit had one reviewer violate the contract in 9 of 16 findings and
 another silently read 57% of its declared scope, and neither was caught until reconciliation.
 
+**Then run the static checks** — only now, after every reviewer has returned, so that none of
+them can see the output. They take seconds and read no file a reviewer would, so a resumed run
+simply runs them again:
+
+```bash
+python3 <review-kit>/bin/detect.py --manifest $D/manifest.json --findings $D/findings-static.json
+```
+
+`findings-static.json` is a fifth findings file in the contract's shape, holding the detectors'
+precise hits within the manifest's review tier, one finding per defect per file. It goes
+through `validate` and `fingerprint` with the rest, so `cluster` shows where a detector and a
+reviewer found the same thing. It is not audited: no agent wrote it.
+
 ```bash
 for f in $D/findings-*.json; do
   # || continue: without it the exit status is discarded and a contract-violating file is
@@ -325,7 +340,8 @@ done
 # findings file is audited against ITS OWN agent id — without that, every reviewer's reads
 # vouch for every other's claims, and `audit` refuses to run rather than pretend otherwise.
 python3 <review-kit>/bin/review.py audit --repo . --access-log $STORE/access.jsonl --list-agents
-# Match each id to a reviewer by the paths it touched, then, per file:
+# Match each id to a reviewer by the paths it touched, then, per reviewer file (not
+# findings-static.json, which no agent wrote):
 python3 <review-kit>/bin/review.py audit --findings $D/findings-code.json --repo . \
     --access-log $STORE/access.jsonl --agent <that reviewer's id> --run-dir $D
 python3 <review-kit>/bin/review.py cluster --run-dir $D
@@ -382,7 +398,8 @@ Spawn **one** agent, not in parallel with anything:
 > Read `<review-kit>/skills/reconcile-reviews/SKILL.md` and follow it exactly. Also read
 > `<review-kit>/FINDINGS.md` and `<review-kit>/PRACTICES.md`.
 > The findings files are `$STORE/runs/<RUN>/findings-*.json`, already validated and
-> fingerprinted. In the same directory: `clusters.json` (corroborated groups, plus proximity
+> fingerprinted; `findings-static.json` among them holds the static checks' findings, which
+> your skill tells you how to treat. In the same directory: `clusters.json` (corroborated groups, plus proximity
 > candidates you must judge by hand), `recurrence.json` (defects also reported last run),
 > `manifest.json` (the three-tier scope), `machine.json`, `probes.json` and `repo_profile.json`.
 > `$STORE/open_defects.json` carries defects earlier runs confirmed — run `carryover` against

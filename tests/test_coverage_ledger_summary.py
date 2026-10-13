@@ -85,7 +85,7 @@ BAD = {
     "severity": ({"severity": "High"}, "severity 'High'"),
     "disposition": ({"disposition": "confirmed"}, "disposition 'confirmed'"),
     "class": ({"class": "bug"}, "class 'bug'"),
-    "reviewer": ({"corroborated_by": ["review-tests"]}, "not reviewers"),
+    "reviewer": ({"corroborated_by": ["review-tests"]}, "not sources"),
     "corroborated_by type": ({"corroborated_by": "code"}, "must be a list"),
     "missing key": ({"defect": None}, "missing 'defect'"),
 }
@@ -160,3 +160,36 @@ def test_summary_headers_match_their_items(tmp_path, reconciled):
     sections = dict(re.findall(r"### (\w+) — (\d+)", text))
     assert sections == {"Critical": "1", "Minor": "1"}
     assert "a.py:1" not in text.split("## For you")[1].split("##")[0]
+
+
+# ---------------------------------------------------------------- the static source
+
+def test_static_is_a_source_the_reconciliation_may_name(tmp_path, reconciled):
+    d, fp = reconciled
+    write_reconciliation(d, [item(fp["c1"], "a.py:2", severity="critical",
+                                  corroborated_by=["static"]),
+                             item(fp["c2"], "a.py:1", corroborated_by=["code", "static"])])
+    r = run("review.py", *STAGES["summarize"](d, tmp_path))
+    assert r.returncode == 0, r.stderr
+    assert "**static check only**" in (tmp_path / "SUMMARY.md").read_text()
+    r = run("review.py", *STAGES["ledger"](d, tmp_path))
+    assert {x["reviewer"] for x in ledger_rows(tmp_path)} == {"code", "static"}
+
+
+def test_coverage_does_not_credit_the_static_checks(tmp_path, repo):
+    d = make_run(tmp_path, "R1", repo, read={"code": ["a.py"]})
+    (d / "findings-static.json").write_text(json.dumps({
+        "reviewer": "static", "scope": {"files_read": ["a.py", "src/m.py"]},
+        "findings": [finding("s1", "src/m.py", 1)]}))
+    files = coverage(d, tmp_path / "coverage.json")
+    assert files["a.py"]["reviewed_by"] == {"code": "R1"}
+    assert files["src/m.py"]["reviewed_by"] == {} and files["src/m.py"]["findings_total"] == 0
+
+
+def test_runs_does_not_list_the_static_file_as_unexpected(tmp_path, installed, repo):
+    from conftest import load
+    store = load("review").store_path(repo)
+    d = make_run(store / "runs", "R1", repo, read={"code": ["a.py"]})
+    (d / "findings-static.json").write_text("{}")
+    r = run("review.py", "runs", "--repo", repo, cwd=repo)
+    assert "also present" not in r.stdout

@@ -540,6 +540,11 @@ def cmd_scope(a):
 # ---------------------------------------------------------------- runs
 
 REVIEWER_LEGS = ("fresh-eyes", "code", "analysis", "docs")
+# The static detectors (bin/detect.py) write a findings file of their own. It is a source the
+# reconciler verifies like a reviewer's, but not a reviewer leg: a run is not waiting for it,
+# and it reads no file the way a reviewer does, so coverage does not credit it.
+STATIC = "static"
+SOURCES = REVIEWER_LEGS + (STATIC,)
 
 
 def run_state(run_dir: Path, repo: Path) -> dict:
@@ -553,7 +558,7 @@ def run_state(run_dir: Path, repo: Path) -> dict:
     man = _load_json(run_dir / "manifest.json")
     legs = {leg: (run_dir / f"findings-{leg}.json").exists() for leg in REVIEWER_LEGS}
     extra = sorted(q.name for q in run_dir.glob("findings-*.json")
-                   if q.stem[len("findings-"):] not in REVIEWER_LEGS)
+                   if q.stem[len("findings-"):] not in SOURCES)
     st = {"run_id": run_dir.name, "path": str(run_dir),
           "has_manifest": bool(man),
           "legs_done": [k for k, v in legs.items() if v],
@@ -1713,7 +1718,9 @@ def cmd_coverage(a):
 
     # who read what, this run
     read_by, queried_by = {}, {}
-    for fp_ in sorted(run.glob("findings-*.json")):
+    agent_files = [q for q in sorted(run.glob("findings-*.json"))
+                   if q.stem[len("findings-"):] != STATIC]
+    for fp_ in agent_files:
         d = _load_json(fp_)
         rev = d.get("reviewer") or fp_.stem
         # The manifest's spelling, as `validate` and `audit` use: a declared `./a.py` is a.py.
@@ -1724,7 +1731,7 @@ def cmd_coverage(a):
 
     # findings per file, this run
     per_file = {}
-    for fp_ in sorted(run.glob("findings-*.json")):
+    for fp_ in agent_files:
         for f in _load_json(fp_).get("findings", []):
             if f.get("file"):
                 k = manifest_spelling(man.get("repo"), f["file"])
@@ -2439,9 +2446,9 @@ def reconciliation_problems(r):
         # `code`; the ledger then counted one reviewer under two names. Accept the old
         # spelling, record the canonical one.
         names = [n[len("review-"):] if n.startswith("review-") else n for n in cb]
-        bad = [n for n in names if n not in REVIEWER_LEGS]
+        bad = [n for n in names if n not in SOURCES]
         if bad:
-            v.append(f"{tag}: corroborated_by names {bad}, not reviewers {REVIEWER_LEGS}")
+            v.append(f"{tag}: corroborated_by names {bad}, not sources {SOURCES}")
         else:
             x["corroborated_by"] = sorted(set(names), key=names.index)
     return v
@@ -2508,6 +2515,7 @@ def cmd_summarize(a):
                 corr = x.get("corroborated_by") or []
                 w(f"**{i}. {x['title']}** · `{x['where']}`"
                   + (f" · corroborated by {', '.join(corr)}" if len(corr) > 1 else
+                     " · **static check only**" if corr == [STATIC] else
                      " · **single reviewer**" if corr else ""))
                 w(f"- **What is wrong:** {x['defect']}")
                 if x.get("verified_by"):

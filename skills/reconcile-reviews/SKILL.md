@@ -65,6 +65,26 @@ box rather than producing a wrong line. (`M-3`, `M-4`)
 Never run a heavy command in a reduced form to get a partial answer. A run on a sample answers
 a different question, and a verdict built on it would be wrong in a way nobody could see.
 
+### The static checks are a fifth source, not a fifth reviewer
+
+`findings-static.json` comes from `bin/detect.py`: scripts that match specific defective
+patterns in the code — a seedable call without its seed, a transformer fitted on held-out
+rows, a file read that nothing writes, a name used and never defined. It is in the same shape
+as a reviewer's file, its findings are all `likely`, and its evidence is the quoted site.
+The orchestrator runs it after the four reviewers return, so none of them has seen it.
+
+Verify each static finding like any other: go to the site and check the claim. They are
+usually quick — a syntax error compiles or it does not, a `random_state` is passed or it is
+not. Refute freely: the detectors have known false-positive shapes — a parameter a plug-in
+interface dictates, a config key a third-party library reads, an input the README downloads,
+a seed set in an imported module the detector did not follow. Never take the static checks'
+silence as evidence of anything; they look for a few patterns and nothing else.
+
+When a static finding is the same defect as a reviewer's, put `static` in that item's
+`corroborated_by` alongside the reviewer. When only the static checks found it and you confirm
+it, `corroborated_by` is `["static"]`, and the summary marks it **static check only**. Over
+runs, the ledger's `static` row is the measured precision of the detectors.
+
 ## Stage 1 — Verify
 
 The findings files present are the legs that ran. A reviewer can be missing because a usage
@@ -363,7 +383,7 @@ Each item in `items`:
 ```
 
 `corroborated_by` names reviewers exactly as their findings files do: `fresh-eyes`, `code`,
-`analysis`, `docs`. `carryover`, `summarize` and `ledger` all refuse a reconciliation with an
+`analysis`, `docs`, and `static` for the static checks. `carryover`, `summarize` and `ledger` all refuse a reconciliation with an
 unknown disposition, severity, class or reviewer name, and list every problem at once.
 
 `disposition: dropped` is how a refuted finding is recorded — it stays in the ledger and never

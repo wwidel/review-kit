@@ -67,6 +67,16 @@ def reviewer(rv, d, leg, findings):
     return json.loads(p.read_text())
 
 
+def static(rv, d):
+    """The static checks, after the reviewers, then validate and fingerprint like theirs."""
+    r = run("detect.py", "--manifest", d / "manifest.json", "--findings",
+            d / "findings-static.json", cwd=rv.repo)
+    assert r.returncode == 0, r.stderr
+    rv("validate", "--findings", d / "findings-static.json", "--manifest", d / "manifest.json")
+    rv("fingerprint", "--findings", d / "findings-static.json", "--manifest", d / "manifest.json")
+    return json.loads((d / "findings-static.json").read_text())
+
+
 def access_log(store, d, legs):
     """The hook's records for each leg's reads, one agent id per leg."""
     manifest = json.loads((d / "manifest.json").read_text())
@@ -123,6 +133,7 @@ def full_run(rv, run_id, legs=LEGS, prev=None):
     if "analysis" in legs:
         docs["analysis"] = reviewer(rv, d, "analysis", [
             finding("a1", "a.py", 2, "the draw is unseeded", "critical")])
+    static(rv, d)
     access_log(store, d, legs)
     stage3(rv, store, d, legs, prev)
     c1, c2 = docs["code"]["findings"]
@@ -134,6 +145,9 @@ def full_run(rv, run_id, legs=LEGS, prev=None):
 
 def test_a_full_run(rv, repo):
     store, d, c1, c2 = full_run(rv, "R1")
+    doc = json.loads((d / "findings-static.json").read_text())
+    # a.py draws from numpy's global RNG with no seed: a held-back kind, counted, not sent.
+    assert doc["reviewer"] == "static" and doc["denominators"]["held_back"] == 1
     text = rv.summary().read_text()
     assert "**1 confirmed defects for you (1 critical).**" in text
     assert "1 reported finding was refuted and dropped" in text

@@ -7,6 +7,10 @@ the site suspicious. They differ from `review.py probe`, which lists every site 
 specific defective pattern, so most of its hits should be worth a finding on their own.
 
     python3 detect.py --repo PATH [--json OUT] [--words FILE] [--only NAME,...]
+    python3 detect.py --manifest RUN/manifest.json --findings RUN/findings-static.json
+
+The second form is how /repo-audit uses it: the precise kinds, within the run's review tier,
+written as a findings document for the reconciler to verify like any reviewer's.
 
 Detectors (and the taxonomy category each targets):
 
@@ -1180,22 +1184,140 @@ def run(repo: Path, only=None, words=None):
     return sorted(hits, key=lambda h: (h.detector, h.file, h.line))
 
 
-def main():
+# ---------------------------------------------------------------- findings for a review
+
+STATIC_REVIEWER = "static"
+
+# The kinds precise enough to send to the reconciler as findings, each with how bad the
+# defect is if true, the fix, and whether that fix is mechanical. The rest — unused
+# parameters, unread config keys, duplicated blocks and identical bodies, file-level global RNG
+# use, the pandas regex default — were mostly noise on unseen code, so they are counted in the
+# findings file and not sent.
+SENT = {
+    "seedable-call-without-seed": ("minor", "pass random_state (or seed) explicitly", "mechanical", "T-7"),
+    "unseeded-dataloader": ("major", "seed torch at the entry point and pass a seeded generator to the DataLoader", "judgment", "T-7"),
+    "unseeded-torch-training": ("major", "seed torch, numpy and random at the entry point, and record the seed with the run", "judgment", "T-7"),
+    "commented-out-seed": ("major", "restore the seeding call, or record why the run is deliberately unseeded", "judgment", "T-7"),
+    "r-script-without-set-seed": ("minor", "call set.seed before the first random call", "mechanical", "T-7"),
+    "fit-on-heldout": ("major", "fit on the training rows only and transform the held-out rows", "judgment", "T-4"),
+    "fit-on-train-and-test": ("major", "fit on the training rows only, inside the fold", "judgment", "T-4"),
+    "refit-on-different-data": ("major", "fit once and transform every split with that fit", "judgment", "T-4"),
+    "fit-before-split": ("major", "move the fit inside the fold loop or after the split", "judgment", "T-4"),
+    "heldout-statistic": ("minor", "compute the statistic on the training rows and apply it to the held-out rows", "judgment", "T-4"),
+    "resample-before-split": ("major", "split first, then resample the training side only", "judgment", None),
+    "parameter-overwritten": ("major", "use the parameter, or remove it so callers cannot believe it has an effect", "judgment", None),
+    "constant-condition": ("minor", "read the setting from configuration, or remove the dead branch", "judgment", None),
+    "case-mismatch-comparison": ("minor", "compare against the value actually assigned", "mechanical", None),
+    "argv-dispatch-without-else": ("minor", "add an else that prints usage and exits non-zero", "mechanical", None),
+    "read-without-writer": ("minor", "commit the script that produces the file, or document where it comes from", "judgment", None),
+    "rewrites-inside-words": ("major", "anchor the pattern with word boundaries (\\b) or match whole tokens", "judgment", None),
+    "syntax-error": ("major", "fix the syntax so the file can be imported", "mechanical", None),
+    "undefined-name": ("major", "define or import the name in this file", "judgment", None),
+    "yaml-load-without-loader": ("major", "use yaml.safe_load", "mechanical", "C-6"),
+    "redefined": ("minor", "delete the dead definition, or rename one of them", "judgment", "C-4"),
+    "absolute-path": ("minor", "read the path from configuration or make it relative to the repository", "judgment", "D-5"),
+    "chdir-literal": ("minor", "remove the chdir and use paths relative to the repository", "judgment", "D-5"),
+    "fork-only-global": ("minor", "pass the value to the worker as an argument", "judgment", None),
+}
+
+
+def to_findings(hits, manifest, run_id=None, repo=None):
+    """A findings document in the contract's shape, one finding per (kind, file).
+
+    Only files in the manifest's review tier are reported, so a `--since` window holds; the
+    detectors still read the whole repository, because a missing producer or an undefined
+    name is decided by files outside the window.
+    """
+    review = {f["path"] for f in manifest.get("files", [])}
+    groups, held_back = {}, {}
+    for h in hits:
+        if h.file not in review:
+            continue
+        if h.kind not in SENT:
+            held_back[h.kind] = held_back.get(h.kind, 0) + 1
+            continue
+        groups.setdefault((h.kind, h.file), []).append(h)
+    findings = []
+    for n, ((kind, file), hs) in enumerate(sorted(groups.items(), key=lambda kv: (
+            kv[0][1], min(h.line for h in kv[1]), kv[0][0])), 1):
+        hs = sorted(hs, key=lambda h: h.line)
+        first = hs[0]
+        severity, fix, certainty, rule = SENT[kind]
+        lines = sorted({h.line for h in hs})
+        quote = first.evidence
+        if not quote and repo is not None:
+            try:
+                quote = (Path(repo) / file).read_text(errors="replace").splitlines()[first.line - 1].strip()
+            except (OSError, IndexError):
+                quote = ""
+        claim = first.message + (f" (and {len(hs) - 1} more site(s) in this file of the same "
+                                 f"kind: lines {', '.join(map(str, lines[1:]))})" if len(hs) > 1 else "")
+        findings.append({
+            "id": f"static-{n:03d}", "rule_id": rule, "file": file, "line": first.line,
+            "lines": ",".join(map(str, lines)), "claim": claim, "class": "defect",
+            "evidence": {"kind": "quote", "quote": quote or first.message},
+            "severity": severity, "confidence": "likely", "fix": fix,
+            "fix_certainty": certainty, "detector": first.detector, "detector_kind": kind,
+        })
+    code = sorted(p for p in review if Path(p).suffix.lower() in CODE_EXT)
+    return {
+        "reviewer": STATIC_REVIEWER, "run_id": run_id,
+        "scope": {"mode": manifest.get("mode"), "base": manifest.get("base"),
+                  "files_in_scope": len(review), "files_read": code, "files_queried": []},
+        "machine": {},
+        "denominators": {"files_scanned": len(code), "hits": len(hits),
+                         "hits_in_scope": sum(len(v) for v in groups.values())
+                         + sum(held_back.values()),
+                         "held_back": sum(held_back.values()), "findings": len(findings)},
+        "sections_skipped": [{"section": kind, "reason": f"{n} hit(s) held back: imprecise on "
+                              "unseen code, so not sent as findings"}
+                             for kind, n in sorted(held_back.items())],
+        "not_reviewed": [{"path": p, "reason": "static checks read code only (.py, .R, .sh, "
+                          "YAML)"} for p in sorted(review - set(code))],
+        "findings": findings,
+    }
+
+
+def build_parser():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--repo", required=True)
+    ap.add_argument("--repo", help="the repository to scan (default: the manifest's repo)")
     ap.add_argument("--json", help="write every hit to this file as JSON")
+    ap.add_argument("--findings", help="write the precise hits in the review's manifest scope to "
+                                       "this file as a findings document (needs --manifest)")
+    ap.add_argument("--manifest", help="the run's manifest.json, for --findings")
     ap.add_argument("--words", help="a word list, one per line, for regex-corrupts-words "
                                     "(default: a small built-in list)")
     ap.add_argument("--only", help="comma-separated detector names")
+    return ap
+
+
+def main():
+    ap = build_parser()
     a = ap.parse_args()
+    if a.findings and not a.manifest:
+        ap.error("--findings needs --manifest")
+    manifest = json.loads(Path(a.manifest).read_text()) if a.manifest else None
+    if not a.repo and not manifest:
+        ap.error("give --repo, or --manifest to take it from")
+    repo = Path(a.repo or manifest["repo"]).resolve()
     words = None
     if a.words:
         words = [w.strip() for w in Path(a.words).read_text().splitlines()
                  if w.strip().isalpha() and len(w.strip()) > 2]
-    hits = run(Path(a.repo).resolve(), set(a.only.split(",")) if a.only else None, words)
+    hits = run(repo, set(a.only.split(",")) if a.only else None, words)
     if a.json:
         Path(a.json).write_text(json.dumps([asdict(h) for h in hits], indent=1))
+    if a.findings:
+        out = Path(a.findings)
+        doc = to_findings(hits, manifest, run_id=out.parent.name, repo=repo)
+        tmp = out.with_name(out.name + ".tmp")
+        tmp.write_text(json.dumps(doc, indent=2))
+        tmp.replace(out)
+        d = doc["denominators"]
+        print(f"static: {len(doc['findings'])} finding(s) from {d['hits_in_scope']} hit(s) in "
+              f"scope ({d['held_back']} held back as imprecise) -> {out}")
+        return
     by = {}
     for h in hits:
         by.setdefault(h.detector, []).append(h)
