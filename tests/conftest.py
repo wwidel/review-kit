@@ -22,6 +22,7 @@ def load(name):
     """Import a script from bin/ as a module, fresh each time."""
     spec = importlib.util.spec_from_file_location(f"kit_{name}", BIN / f"{name}.py")
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod        # dataclasses look their module up while defining
     spec.loader.exec_module(mod)
     return mod
 

@@ -376,6 +376,9 @@ review-kit/
     review.py                       all the bookkeeping: scope, probe, validate, cluster,
                                     coverage, carryover, summarize, ledger
     log_file_access.py              PostToolUse hook backing `review.py audit`
+    detect.py                       static detectors for specific defect patterns (unseeded
+                                    randomness, fitting outside the fold, code that cannot
+                                    run, ...). Not yet wired into a review; run it by hand
     install.py                      puts the skills and the hook where they must be
   skills/
     repo-audit/SKILL.md             orchestrator — the entry point
