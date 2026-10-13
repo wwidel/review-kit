@@ -1925,10 +1925,11 @@ def cmd_carryover(a):
     states = {"re-reported": [], "not-re-checked": [], "plausibly-fixed": [], "missed": []}
 
     # 1. everything previously open: classify against the current source.
-    #    `anchors` holds every fingerprint the REVIEWERS filed this run; `this_run` holds
-    #    what the reconciler carried through. A defect present in the first and absent from
-    #    the second was not missed by the reviewers — it was dropped downstream. Recording
-    #    only "missed" would blame the wrong stage, and the two need different fixes.
+    #    `anchors` holds every fingerprint filed this run — by the reviewers and by the static
+    #    checks; `this_run` holds what the reconciler carried through. A defect present in the
+    #    first and absent from the second was not missed — it was dropped downstream. Recording
+    #    only "missed" would blame the wrong stage, and the two need different fixes. So
+    #    "missed" means that neither a reviewer nor a detector raised it this run.
     for fp_, d in known["defects"].items():
         if d.get("status") in ("fixed", "dropped"):
             continue

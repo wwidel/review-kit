@@ -205,3 +205,27 @@ def test_a_second_run_after_a_fix(rv, repo):
     assert "**0 confirmed defects for you" in rv.summary().read_text()
     cov = json.loads((store / "coverage.json").read_text())["files"]
     assert cov["a.py"]["times_reviewed"] == 2
+
+
+def test_static_findings_flow_through_cluster_carryover_and_summary(rv, repo):
+    """A static finding that duplicates a reviewer's, and one only the static checks found."""
+    (repo / "b.py").write_text("from sklearn.cluster import KMeans\nk = KMeans(3)\n")
+    git(repo, "add", "b.py")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "b")
+    store, d = stage0(rv, "R1")
+    for leg in ("fresh-eyes", "analysis", "docs"):
+        reviewer(rv, d, leg, [])
+    code = reviewer(rv, d, "code", [finding("c1", "b.py", 2, "KMeans has no random_state",
+                                            "minor")])
+    doc = static(rv, d)
+    (s,) = [f for f in doc["findings"] if f["file"] == "b.py"]
+    assert s["fingerprint"] == code["findings"][0]["fingerprint"]   # same site, same id
+    access_log(store, d, LEGS)
+    stage3(rv, store, d, LEGS)
+    clusters = json.loads((d / "clusters.json").read_text())
+    assert {"code", "static"} in [set(c["reviewers"]) for c in clusters["exact_clusters"]]
+    stage5(rv, store, d, [rec_item(code["findings"][0], "open", ["code", "static"])])
+    text = rv.summary().read_text()
+    assert "b.py:2" in text
+    rows = {r["reviewer"] for r in map(json.loads, (store / "ledger.jsonl").read_text().splitlines())}
+    assert rows == {"code", "static"}

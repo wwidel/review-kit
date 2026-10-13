@@ -73,8 +73,10 @@ your own output.
 ```
 
 A fifth file in the same shape, `findings-static.json`, is written by `bin/detect.py` rather
-than by an agent: `reviewer` is `static`, every finding is `likely` with the quoted site as
-evidence, and two extra fields, `detector` and `detector_kind`, name the check that fired.
+than by an agent: `reviewer` is `static`, every finding is `likely` — or `speculative` where
+the detector itself is unsure — with the quoted site as evidence, `lines` lists every site as
+comma-separated numbers, and two extra fields, `detector` and `detector_kind`, name the check
+that fired.
 
 ## Field rules
 

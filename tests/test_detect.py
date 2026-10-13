@@ -101,7 +101,16 @@ def test_r_script_sampling_without_set_seed(tmp_path):
     ("from sklearn.preprocessing import StandardScaler\ns = StandardScaler()\n"
      "s.fit(np.vstack((train, test_feats)))\n", ["fit-on-train-and-test"]),
     ("from sklearn.feature_extraction.text import TfidfVectorizer\nv = TfidfVectorizer()\n"
-     "a = v.fit_transform(q1)\nb = v.fit_transform(q2)\n", ["refit-on-different-data"]),
+     "a = v.fit_transform(q1)\nb = v.fit_transform(q2)\nsim = cosine(a, b)\n",
+     ["refit-on-different-data"]),
+    ("from sklearn.feature_extraction.text import TfidfVectorizer\nv = TfidfVectorizer()\n"
+     "a = v.fit_transform(train_text)\nb = v.fit_transform(test_text)\n",
+     ["fit-on-heldout", "refit-on-different-data"]),
+    ("from sklearn.preprocessing import StandardScaler\ns = StandardScaler()\n"
+     "a = s.fit_transform(df[['age']])\nb = s.fit_transform(df[['income']])\n", []),
+    ("from sklearn.feature_extraction.text import TfidfVectorizer\n"
+     "a = TfidfVectorizer().fit_transform(df.title)\nb = TfidfVectorizer().fit_transform(df.body)\n",
+     []),
     ("from sklearn.preprocessing import Normalizer\na = Normalizer().fit_transform(x1)\n"
      "b = Normalizer().fit_transform(x2)\n", []),
     ("from sklearn.preprocessing import StandardScaler\nfrom sklearn.model_selection import KFold\n"
@@ -149,17 +158,17 @@ def test_resampling_after_the_split_is_fine(tmp_path):
 # ---------------------------------------------------------------- ignored-setting
 
 @pytest.mark.parametrize("code,expected", [
-    ("class D:\n    def __init__(self, train_csv='t.csv'):\n        self.train_csv = 'train.csv'\n",
+    ("class D:\n    def __init__(self, labels_file='a.csv'):\n        self.labels_file = 'labels.csv'\n",
      ["parameter-overwritten"]),
     ("def f(a, threshold):\n    return a\n", ["parameter-unused"]),
     ("def f(a, **_):\n    return a\n", []),
     ("import torch\nclass M(torch.nn.Module):\n    def forward(self, x, labels=None):\n"
      "        return x\n", []),
     ("class C:\n    def __exit__(self, t, v, tb):\n        return False\n", []),
-    ("def train():\n    for e in range(3):\n        warmup = True\n        if warmup and e < 2:\n"
+    ("def train():\n    for e in range(3):\n        use_cache = True\n        if use_cache and e < 2:\n"
      "            pass\n", ["constant-condition"]),
-    ("class T:\n    def __init__(self):\n        self.space = 'RGB'\n    def f(self, x):\n"
-     "        if self.space == 'rgb':\n            return x\n", ["case-mismatch-comparison"]),
+    ("class T:\n    def __init__(self):\n        self.unit = 'KM'\n    def f(self, x):\n"
+     "        if self.unit == 'km':\n            return x\n", ["case-mismatch-comparison"]),
     ("import sys\nif sys.argv[1] == '-a':\n    pass\nelif sys.argv[1] == '-b':\n    pass\n",
      ["argv-dispatch-without-else"]),
     ("import sys\nif sys.argv[1] == '-a':\n    pass\nelse:\n    sys.exit(2)\n", []),
@@ -184,9 +193,9 @@ def test_a_read_nothing_writes(tmp_path):
 
 
 def test_a_near_miss_writer_is_named(tmp_path):
-    hits = scan(tmp_path, {"a.py": "x = pd.read_csv('x_train.csv')\n",
-                           "b.py": "df.to_csv('x_train_kcore.csv')\n"}, "missing-producer")
-    assert "x_train_kcore.csv instead" in hits[0].message and hits[0].confidence == "high"
+    hits = scan(tmp_path, {"a.py": "x = pd.read_csv('features.csv')\n",
+                           "b.py": "df.to_csv('features_v2.csv')\n"}, "missing-producer")
+    assert "features_v2.csv instead" in hits[0].message and hits[0].confidence == "high"
 
 
 @pytest.mark.parametrize("files", [
@@ -203,21 +212,21 @@ def test_inputs_that_are_accounted_for(tmp_path, files):
 # ---------------------------------------------------------------- regex-corrupts-words
 
 def test_a_rule_without_boundaries_rewrites_words(tmp_path):
-    code = "import re\ntext = re.sub('U\\\\.?S\\\\.?A', ' America ', text, flags=re.IGNORECASE)\n"
+    code = "import re\ntext = re.sub('and', ' & ', text, flags=re.IGNORECASE)\n"
     hits = scan(tmp_path, {"a.py": code}, "regex-corrupts-words", words=["thousand", "the"])
     assert kinds(hits) == ["rewrites-inside-words"] and "thousand" in hits[0].message
 
 
 def test_a_rule_with_boundaries_is_fine(tmp_path):
-    code = "import re\ntext = re.sub(r'\\bUSA\\b', 'America', text)\n"
+    code = "import re\ntext = re.sub(r'\\band\\b', '&', text)\n"
     assert scan(tmp_path, {"a.py": code}, "regex-corrupts-words", words=["thousand"]) == []
 
 
 def test_pandas_replace_with_metacharacters_and_no_regex_flag(tmp_path):
-    code = "df['f'] = df['f'].str.replace('pets ok.', 'pets')\n"
+    code = "df['f'] = df['f'].str.replace('parking ok.', 'parking')\n"
     assert kinds(scan(tmp_path, {"a.py": code}, "regex-corrupts-words")) == \
         ["str-replace-regex-default"]
-    code = "df['f'] = df['f'].str.replace('pets ok.', 'pets', regex=False)\n"
+    code = "df['f'] = df['f'].str.replace('parking ok.', 'parking', regex=False)\n"
     assert scan(tmp_path, {"a.py": code}, "regex-corrupts-words") == []
 
 
@@ -261,7 +270,7 @@ def test_duplicated_imports_are_not_duplicated_logic(tmp_path):
     ("p = '~/Kaggle/input/train.json'\n", ["absolute-path"]),
     ("p = 'D:/python/data'\n", ["absolute-path"]),
     ("p = 'data/train.csv'\n", []),
-    ("import os\nos.chdir('/home/me/proj')\n", ["absolute-path", "chdir-literal"]),
+    ("import os\nos.chdir('/home/me/proj')\n", ["chdir-literal"]),
 ])
 def test_hard_coded_path(tmp_path, code, expected):
     assert kinds(scan(tmp_path, {"a.py": code}, "hard-coded-path")) == expected
@@ -339,7 +348,7 @@ def test_one_finding_per_kind_and_file_and_imprecise_kinds_held_back(tmp_path):
     kinds_ = sorted((f["file"], f["detector_kind"]) for f in doc["findings"])
     assert kinds_ == [("a.py", "seedable-call-without-seed"), ("b.py", "yaml-load-without-loader")]
     seed = next(f for f in doc["findings"] if f["file"] == "a.py")
-    assert seed["lines"] == "2,3" and "1 more site" in seed["claim"]
+    assert seed["lines"] == "2,3" and "the same at line(s) 3" in seed["claim"]
     assert doc["denominators"]["held_back"] == 1          # the unused parameter
     assert [s["section"] for s in doc["sections_skipped"]] == ["parameter-unused"]
 
@@ -360,3 +369,255 @@ def test_findings_needs_a_manifest(tmp_path):
     from conftest import run
     r = run("detect.py", "--repo", tmp_path, "--findings", tmp_path / "f.json")
     assert r.returncode == 2 and "--manifest" in r.stderr
+
+
+# ---------------------------------------------------------------- regressions from review
+
+def test_an_invalid_replacement_template_does_not_crash_the_run(tmp_path):
+    code = ("import re\na = re.sub(r'ou', r'\\1', t)\nb = re.sub(r'ou', r'\\d', t)\n"
+            "c = re.sub(r'(?P<x>ou)', r'\\g<y>', t)\n")
+    assert scan(tmp_path, {"a.py": code}, "regex-corrupts-words", words=["house"]) == []
+
+
+def test_a_byte_order_mark_is_not_a_syntax_error(tmp_path):
+    hits = scan(tmp_path, {"a.py": "\ufeffimport os\nprint(os.sep)\n"}, "cannot-run")
+    assert hits == []
+
+
+def test_line_numbers_ignore_unicode_line_separators(tmp_path):
+    code = 'S = "a\u2028b\x0cc"\nfrom sklearn.cluster import KMeans\nKMeans(3)\n'
+    (hit,) = scan(tmp_path, {"a.py": code}, "unseeded")
+    assert hit.line == 3 and hit.evidence == "KMeans(3)"
+
+
+def test_async_with_and_match_blocks_give_one_hit_each(tmp_path):
+    code = textwrap.dedent("""
+    from sklearn.preprocessing import StandardScaler
+    s = StandardScaler()
+    async def f():
+        async with lock:
+            x_test = s.fit_transform(x_test)
+    def g(v):
+        match v:
+            case 1:
+                y_test = s.fit_transform(y_test)
+    """)
+    hits = scan(tmp_path, {"a.py": code}, "fit-outside-fold")
+    assert sorted((h.kind, h.line) for h in hits) == [("fit-on-heldout", 6), ("fit-on-heldout", 10)]
+
+
+@pytest.mark.parametrize("code", [
+    "test['pred'] = test[['p1', 'p2']].mean(axis=1)\n",
+    "val_df['m'] = val_df[cols].max(axis='columns')\n",
+    "s.fit(df[df['is_test'] == 0])\n",
+    "s.fit(X[~test_mask])\n",
+    "from sklearn.manifold import TSNE\nemb = TSNE(2).fit_transform(X_test)\n",
+    "from sklearn.preprocessing import LabelEncoder\nfrom sklearn.model_selection import "
+    "train_test_split\ny = LabelEncoder().fit_transform(y)\na, b = train_test_split(X, y, "
+    "random_state=0)\n",
+])
+def test_fit_outside_fold_near_misses(tmp_path, code):
+    code = "from sklearn.preprocessing import StandardScaler\ns = StandardScaler()\n" + code
+    assert scan(tmp_path, {"a.py": code}, "fit-outside-fold") == []
+
+
+def test_a_repository_function_named_like_a_library_one_is_not_a_fitter(tmp_path):
+    code = textwrap.dedent("""
+    import json
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.model_selection import train_test_split
+    def load(df):
+        return StandardScaler().fit_transform(df)
+    cfg = json.load(open('c.json'))
+    a, b = train_test_split(df, random_state=0)
+    """)
+    assert scan(tmp_path, {"a.py": code}, "fit-outside-fold") == []
+
+
+def test_a_dataloader_seeded_by_the_entry_point_that_imports_it(tmp_path):
+    files = {"pkg/data.py": "from torch.utils.data import DataLoader\n"
+                            "def make(ds):\n    return DataLoader(ds, shuffle=True)\n",
+             "pkg/train.py": "import torch\nimport data\ntorch.manual_seed(0)\n"}
+    assert scan(tmp_path, files, "unseeded") == []
+
+
+@pytest.mark.parametrize("code", [
+    "from random import shuffle\nshuffle(x)\n",
+    "from scipy.signal import resample\ny = resample(x, 100)\n",
+    "from sklearn.model_selection import train_test_split\na, b = train_test_split(X, shuffle=False)\n",
+    "import numpy as np\nfrom sklearn.cluster import KMeans\nnp.random.seed(0)\n"
+    "def f():\n    return KMeans(3)\n",
+    "from sklearn.model_selection import KFold\nseed_everything(42)\nKFold(5, shuffle=True)\n",
+    "import numpy as np\nnp.random.seed(42)\n# np.random.seed(0)  # old value\n",
+    "# we call np.random.seed(0) in main()\nx = 1\n",
+])
+def test_unseeded_near_misses(tmp_path, code):
+    assert scan(tmp_path, {"a.py": code}, "unseeded") == []
+
+
+def test_sklearn_shuffle_without_a_seed_is_flagged(tmp_path):
+    code = "from sklearn.utils import shuffle\nX, y = shuffle(X, y)\n"
+    assert kinds(scan(tmp_path, {"a.py": code}, "unseeded")) == ["seedable-call-without-seed"]
+
+
+def test_a_commented_set_seed_in_r_does_not_seed(tmp_path):
+    hits = scan(tmp_path, {"a.R": "# set.seed(1)\nx <- sample(1:10)\n"}, "unseeded")
+    assert kinds(hits) == ["r-script-without-set-seed"]
+
+
+@pytest.mark.parametrize("code", [
+    "def f():\n    verbose, n = parse()\n    verbose = False\n    if verbose:\n        pass\n",
+    "def f():\n    debug = False\n    if (debug := get()):\n        pass\n",
+    "def f():\n    ok = False\n    with ctx() as ok:\n        pass\n    if ok:\n        pass\n",
+    "def f():\n    e = False\n    try:\n        pass\n    except Exception as e:\n        pass\n"
+    "    if e:\n        pass\n",
+    "class C:\n    def __init__(self):\n        self.mode = 'RGB'\n"
+    "def load(mode='RGB'):\n    mode = mode.lower()\n    if mode == 'rgb':\n        return 1\n",
+])
+def test_ignored_setting_near_misses(tmp_path, code):
+    assert scan(tmp_path, {"a.py": code}, "ignored-setting") == []
+
+
+def test_a_nested_function_condition_is_reported_once(tmp_path):
+    code = "def outer():\n    def inner():\n        flag = True\n        if flag:\n            pass\n"
+    assert kinds(scan(tmp_path, {"a.py": code}, "ignored-setting")) == ["constant-condition"]
+
+
+@pytest.mark.parametrize("code,expected", [
+    ("import pandas as pd\nfrom sklearn.model_selection import train_test_split\n"
+     "d = df.resample('D').mean()\na, b = train_test_split(d, random_state=0)\n", []),
+    ("from sklearn.model_selection import train_test_split\nd = df.sample(n=100, random_state=1)\n"
+     "a, b = train_test_split(d, random_state=0)\n", []),
+    ("from sklearn.model_selection import train_test_split\n"
+     "d = df.sample(frac=2, replace=True, random_state=1)\na, b = train_test_split(d, random_state=0)\n",
+     ["resample-before-split"]),
+])
+def test_resample_variants(tmp_path, code, expected):
+    assert kinds(scan(tmp_path, {"a.py": code}, "resample-before-split")) == expected
+
+
+@pytest.mark.parametrize("files", [
+    {"a.py": "import h5py\nh5py.File('feats.h5', 'w')\nx = h5py.File('feats.h5')\n"},
+    {"a.py": "pl.read_csv('out.csv')\n", "b.py": "frame.write_csv('out.csv')\n"},
+    {"a.py": "x = np.load('m.npy')\n", "b.py": "Path('m.npy').write_bytes(b)\n"},
+    {"tests/test_io.py": "x = pd.read_parquet('made_by_code.parquet')\n"},
+])
+def test_missing_producer_near_misses(tmp_path, files):
+    assert scan(tmp_path, files, "missing-producer") == []
+
+
+def test_an_unreadable_document_does_not_crash_the_run(tmp_path):
+    import os
+    root = tmp_path / "r0"
+    root.mkdir()
+    (root / "a.py").write_text("x = pd.read_csv('feats.csv')\n")
+    (root / "NOTES.md").write_text("feats.csv\n")
+    (root / "NOTES.md").chmod(0)
+    try:
+        hits = detect.run(root, {"missing-producer"})
+    finally:
+        (root / "NOTES.md").chmod(0o644)
+    if os.geteuid() != 0:
+        assert kinds(hits) == ["read-without-writer"]
+
+
+@pytest.mark.parametrize("code", [
+    "import re\nt = re.sub('[a-z0-9]', 'i', t)\n",          # a deliberate per-character mask
+    "import re\nt = re.sub(r'ing\\b', '', t)\n",            # anchored at the word's end
+    "import re\nt = re.sub('ou', 'ou', t)\n",                # rewrites nothing
+    "import re\nt = re.sub('x*', '', t)\n",                  # matches the empty string
+    "df['f'] = df['f'].str.replace('.', ',')\n",             # one character: literal in pandas < 2
+])
+def test_regex_near_misses(tmp_path, code):
+    assert scan(tmp_path, {"a.py": code}, "regex-corrupts-words", words=["house", "running"]) == []
+
+
+def test_from_re_import_sub_and_positional_flags(tmp_path):
+    import re as _re
+    code = "from re import sub\nimport re\nt = sub('AND', ' & ', t, 0, re.IGNORECASE)\n"
+    hits = scan(tmp_path, {"a.py": code}, "regex-corrupts-words", words=["thousand"])
+    assert kinds(hits) == ["rewrites-inside-words"]
+
+
+@pytest.mark.parametrize("code,expected", [
+    ("def f():\n    pass\nreturn 1\n", ["syntax-error"]),       # only compile() sees this
+    ("x = '''\n%s rows\n'''\ny = (\n", ["syntax-error"]),       # not a magic: a string
+    ("v = {}\nmatch v:\n    case {'a': 1, **rest}:\n        print(rest)\n", []),
+    ("class C:\n    name = __qualname__\n", []),
+    ("try:\n    pass\nexcept WindowsError:\n    pass\n", []),
+    ("y = undefined_thing\nexec('undefined_thing = 1')\n", []),   # exec can define names
+])
+def test_cannot_run_cases(tmp_path, code, expected):
+    hits = scan(tmp_path, {"a.py": code}, "cannot-run")
+    assert kinds(hits) == expected
+    if expected and "rows" in code:
+        assert "magic" not in hits[0].message and hits[0].line == 4
+
+
+def test_an_ipython_magic_is_named(tmp_path):
+    (hit,) = scan(tmp_path, {"a.py": "x = 1\n%matplotlib inline\n"}, "cannot-run")
+    assert hit.line == 2 and "IPython magic" in hit.message
+
+
+def test_redefinition_used_in_between_is_not_called_dead(tmp_path):
+    code = "def f():\n    return 1\nf()\ndef f():\n    return 2\n"
+    (hit,) = scan(tmp_path, {"a.py": code}, "duplicate-code")
+    assert "dead" not in hit.message and hit.evidence == "def f():"
+
+
+def test_a_class_redefined_inside_a_class(tmp_path):
+    code = "class A:\n    class B:\n        x = 1\n    class B:\n        x = 2\n"
+    (hit,) = scan(tmp_path, {"a.py": code}, "duplicate-code")
+    assert hit.kind == "redefined" and hit.evidence == "class B:"
+
+
+def test_interface_methods_and_decorated_stubs_are_skipped(tmp_path):
+    code = textwrap.dedent("""
+    import abc
+    class Base(abc.ABC):
+        @abc.abstractmethod
+        def run(self, cfg):
+            return None
+        @property
+        def size(self, unused=None):
+            return 1
+    """)
+    assert scan(tmp_path, {"a.py": code}, "ignored-setting") == []
+
+
+def test_torch_training_needs_an_entry_point(tmp_path):
+    code = "def step(loss):\n    loss.backward()\n"
+    assert scan(tmp_path, {"lib.py": code}, "unseeded") == []
+
+
+def test_an_argv_check_without_elif_is_not_a_dispatch(tmp_path):
+    code = "import sys\nif len(sys.argv) > 1:\n    print(sys.argv[1])\n"
+    assert scan(tmp_path, {"a.py": code}, "ignored-setting") == []
+
+
+def test_untracked_files_named_by_the_manifest_are_scanned(tmp_path):
+    import json
+    from conftest import run
+    root, d, manifest = scoped(tmp_path, {"a.py": "x = 1\n"})
+    (root / "new.py").write_text("from sklearn.cluster import KMeans\nKMeans(3)\n")
+    manifest["files"].append({"path": "new.py"})
+    (d / "manifest.json").write_text(json.dumps(manifest))
+    run("detect.py", "--manifest", d / "manifest.json", "--findings", d / "findings-static.json",
+        cwd=root)
+    doc = json.loads((d / "findings-static.json").read_text())
+    assert [f["file"] for f in doc["findings"]] == ["new.py"]
+
+
+def test_medium_hits_are_sent_as_speculative(tmp_path):
+    root, d, manifest, doc = static_findings(tmp_path, {
+        "a.py": "import pandas as pd\nfrom sklearn.model_selection import train_test_split\n"
+                "df = pd.DataFrame()\nd = df.sample(frac=2, replace=True, random_state=1)\n"
+                "a, b = train_test_split(d, random_state=0)\n"})
+    (f,) = doc["findings"]
+    assert f["detector_kind"] == "resample-before-split" and f["confidence"] == "speculative"
+
+
+def test_distinct_defects_of_one_kind_in_one_file_are_separate_findings(tmp_path):
+    root, d, manifest, doc = static_findings(tmp_path, {
+        "a.py": "x = alpha + 1\ny = beta + 2\n"})
+    assert sorted(f["claim"].split("'")[1] for f in doc["findings"]) == ["alpha", "beta"]

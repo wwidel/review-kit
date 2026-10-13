@@ -267,9 +267,8 @@ The prompts, in shape — one per reviewer:
 > something, and never substitute a sample for the real run. Record what you deferred and what
 > it would need.
 > Write your findings JSON to `$STORE/runs/<RUN>/findings-code.json`. Print one line only.
-> Do not edit any file. Do not print your findings. Do not open any other `findings-*.json` in
-> that directory: the other reviewers' files, and the static checks', are for the reconciler,
-> and reading one ends the independence your leg exists to provide.
+> Do not edit any file. Do not print your findings. In that directory, open no file other than
+> `manifest.json`, `probes.json`, `machine.json` and the one you write.
 > `<file list>`
 
 …and the same for `review-analysis` → `findings-analysis.json` and `review-docs` →
@@ -314,12 +313,18 @@ first real run of this kit had one reviewer violate the contract in 9 of 16 find
 another silently read 57% of its declared scope, and neither was caught until reconciliation.
 
 **Then run the static checks** — only now, after every reviewer has returned, so that none of
-them can see the output. They take seconds and read no file a reviewer would, so a resumed run
-simply runs them again:
+them can see the output. They take seconds on a repository of a few thousand lines and change
+nothing, so a resumed run simply runs them again:
 
 ```bash
 python3 <review-kit>/bin/detect.py --manifest $D/manifest.json --findings $D/findings-static.json
 ```
+
+If it exits non-zero, carry on without it and say so in the handover. **If any reviewer has to
+run again after this point** — a validation failure, or a resumed run with a leg still missing —
+move `findings-static.json` out of the run directory before spawning it, and run the static
+checks again once every reviewer has returned. Its file must never be on disk while a reviewer
+works.
 
 `findings-static.json` is a fifth findings file in the contract's shape, holding the detectors'
 precise hits within the manifest's review tier, one finding per defect per file. It goes
@@ -331,8 +336,14 @@ for f in $D/findings-*.json; do
   # || continue: without it the exit status is discarded and a contract-violating file is
   # fingerprinted anyway, flows into cluster, and reaches the reconciler — while the last
   # line on screen reads "stamped".
-  python3 <review-kit>/bin/review.py validate --findings $f --manifest $D/manifest.json \
-      || { echo "VALIDATION FAILED: $f — re-run that reviewer once, quoting this output"; continue; }
+  python3 <review-kit>/bin/review.py validate --findings $f --manifest $D/manifest.json || {
+    case "$f" in
+      # No agent wrote it, so there is nobody to re-run: set it aside and report it.
+      *findings-static.json) mv "$f" "$D/static-invalid.json"
+                             echo "STATIC CHECKS INVALID: set aside — say so in the handover" ;;
+      *) echo "VALIDATION FAILED: $f — re-run that reviewer once, quoting this output" ;;
+    esac
+    continue; }
   python3 <review-kit>/bin/review.py fingerprint --findings $f --manifest $D/manifest.json
 done
 

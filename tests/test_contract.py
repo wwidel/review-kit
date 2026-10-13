@@ -20,8 +20,6 @@ def documented_commands():
         text = doc.read_text().replace("\\\n", " ")
         for line in text.splitlines():
             for m in re.finditer(r"review\.py\s+([a-z][a-z-]*)(.*)", line):
-                if "detect.py" in line:
-                    continue
                 rest = re.split(r"\s#\s|`|\||;|&&|\)", m.group(2))[0]
                 if "--" not in rest:
                     continue      # prose that names a command, not an invocation

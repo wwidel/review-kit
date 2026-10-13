@@ -70,20 +70,24 @@ a different question, and a verdict built on it would be wrong in a way nobody c
 `findings-static.json` comes from `bin/detect.py`: scripts that match specific defective
 patterns in the code — a seedable call without its seed, a transformer fitted on held-out
 rows, a file read that nothing writes, a name used and never defined. It is in the same shape
-as a reviewer's file, its findings are all `likely`, and its evidence is the quoted site.
+as a reviewer's file, its findings are `likely` or `speculative`, and its evidence is the
+quoted site.
 The orchestrator runs it after the four reviewers return, so none of them has seen it.
 
 Verify each static finding like any other: go to the site and check the claim. They are
 usually quick — a syntax error compiles or it does not, a `random_state` is passed or it is
-not. Refute freely: the detectors have known false-positive shapes — a parameter a plug-in
-interface dictates, a config key a third-party library reads, an input the README downloads,
-a seed set in an imported module the detector did not follow. Never take the static checks'
-silence as evidence of anything; they look for a few patterns and nothing else.
+not. Refute freely: the detectors have known false-positive shapes — an input the README
+downloads, a file written through a computed path, a seed set somewhere the detector did not
+follow, a text rule that rewrites characters on purpose, a fit the author meant to be
+transductive. Never take the static checks' silence as evidence of anything; they look for a
+few patterns and nothing else.
 
 When a static finding is the same defect as a reviewer's, put `static` in that item's
 `corroborated_by` alongside the reviewer. When only the static checks found it and you confirm
-it, `corroborated_by` is `["static"]`, and the summary marks it **static check only**. Over
-runs, the ledger's `static` row is the measured precision of the detectors.
+it, `corroborated_by` is `["static"]`, and the summary marks it **static check only**. **A
+static finding you refute is an item too**: `disposition: dropped`, `corroborated_by:
+["static"]`. Without it the ledger's `static` row counts only confirmations, and that row is
+the one measurement of how often the detectors are right.
 
 ## Stage 1 — Verify
 
@@ -401,8 +405,9 @@ It answers exactly three questions, in this order, and nothing else:
 
 Rules for what you put in `reconciliation.json`:
 
-- **Confirmed defects only.** Anything you refuted is absent — it belongs in the ledger, not
-  here. A reader must be able to treat every line as real.
+- **Every finding you refuted is an item with `disposition: dropped`**, and nothing else marks
+  one: `summarize` leaves dropped items out of the summary, so every line a reader sees is
+  real, and `ledger` counts them, so each reviewer's refutation rate has a denominator.
 - **Deduplicated.** One entry per defect, not per finding. Say which reviewers corroborated it;
   independent corroboration is information the reader wants.
 - **Ordered by consequence** within each severity, not by file or by reviewer.
