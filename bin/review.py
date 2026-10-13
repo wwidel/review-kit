@@ -121,6 +121,19 @@ def sha256_of(p: Path) -> str:
     return h.hexdigest()
 
 
+LINE_BREAK = re.compile(r"\r\n|\r|\n")
+
+
+def source_lines(text: str) -> list:
+    """A file's lines as Python, the static checks and an editor number them. `str.splitlines`
+    also breaks on form feeds and Unicode separators, so after one of those a line number
+    from a reviewer or a detector anchored the fingerprint on a different line."""
+    lines = LINE_BREAK.split(text)
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def count_lines(p: Path) -> int:
     try:
         with p.open("rb") as f:
@@ -359,10 +372,12 @@ def cmd_scope(a):
     if a.since and a.full:
         die("--since and --full ask for different windows; pass one.")
     if a.since:
-        rc, o, e = sh(f"git rev-parse --verify {a.since}^{{commit}}", cwd=repo)
-        if rc:
-            die(f"cannot resolve --since {a.since}: {e}")
-        base, mode = o, "since"
+        # No shell: a ref name may hold `;` and `$`, which git allows and a shell runs.
+        r = subprocess.run(["git", "rev-parse", "--verify", "--end-of-options",
+                            f"{a.since}^{{commit}}"], cwd=repo, capture_output=True, text=True)
+        if r.returncode:
+            die(f"cannot resolve --since {a.since}: {r.stderr.strip()}")
+        base, mode = r.stdout.strip(), "since"
         # `base` not `base..HEAD`: the working tree is included deliberately. On a live repo
         # the uncommitted change is usually the thing most worth reviewing, and excluding it
         # would silently review a state nobody is currently in.
@@ -370,12 +385,16 @@ def cmd_scope(a):
         # prints them from cwd. With --repo on a subdirectory the two disagreed, every
         # modified file resolved to a non-existent path, and the review window reported it
         # as deleted — while announcing that "a removal can be the defect".
-        rc, o, _ = sh(f"git diff --relative --name-only {base}", cwd=repo)
-        names = [x for x in o.splitlines() if x.strip()]
+        # -z, decoded as the filesystem does: without it git quotes a non-ASCII name
+        # ("caf\303\251.py"), the quoted name matches no file, and a modified file was
+        # recorded as deleted.
+        def z(*args):
+            r = subprocess.run(["git", *args, "-z"], cwd=repo, capture_output=True)
+            return [os.fsdecode(x) for x in r.stdout.split(b"\0") if x.strip()]
+        names = z("diff", "--relative", "--name-only", base)
         # `git diff` lists tracked modifications only. A file created and not yet added is
         # both the most likely thing to be under review and the most likely to be missed.
-        rc2, untracked, _ = sh("git ls-files --others --exclude-standard", cwd=repo)
-        names += [x for x in untracked.splitlines() if x.strip()]
+        names += z("ls-files", "--others", "--exclude-standard")
         paths = [repo / x for x in dict.fromkeys(names)]
 
     rejected, unreadable, deleted, skipped = [], [], [], []
@@ -425,7 +444,11 @@ def cmd_scope(a):
     r_t = subprocess.run(["git", "ls-files", "-z"], cwd=repo, capture_output=True)
     tracked = {os.fsdecode(x) for x in r_t.stdout.split(b"\0")} if r_t.returncode == 0 else set()
     for p in sorted(paths):
-        if p.name == summary and p.parent == repo:
+        # Any root file named like a summary, not only the claimed one: when the install had to
+        # claim REVIEW-SUMMARY-1.md, the skills still tell reviewers never to read
+        # REVIEW-SUMMARY.md, and listing it charged each of them a SCOPE GAP for obeying.
+        if p.parent == repo and (p.name == summary or re.fullmatch(r"REVIEW-SUMMARY.*\.md",
+                                                                   p.name)):
             continue
         rel = str(p.relative_to(repo))
         if (p.suffix.lower() not in SOURCE_EXT and p.name not in NAMED_CODE
@@ -1056,7 +1079,7 @@ def cmd_probe(a):
     texts = {}
     for p in files:
         try:
-            texts[p] = p.read_text(encoding="utf-8", errors="replace").splitlines()
+            texts[p] = source_lines(p.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             pass
 
@@ -1100,11 +1123,17 @@ def cmd_probe(a):
             unparseable.append({"file": str(p.relative_to(repo)), "line": e.lineno,
                                 "text": f"{type(e).__name__}: {e.msg}"})
             continue
+        except (ValueError, RecursionError, MemoryError) as e:
+            # A null byte (ValueError before Python 3.12), or a generated expression nested
+            # deeper than this interpreter's compiler recurses: one file, not the whole probe.
+            unparseable.append({"file": str(p.relative_to(repo)), "line": 1,
+                                "text": f"{type(e).__name__}: {str(e)[:120]}"})
+            continue
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 tree = _ast.parse(src)
-        except SyntaxError:
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
             continue
         # Redefinition only counts within ONE scope. `__init__` in two classes is not a
         # redefinition; walking the whole tree flat would report every method of every class.
@@ -1189,6 +1218,13 @@ def manifest_spelling(repo, p):
     try:
         return q.relative_to(root).as_posix()
     except ValueError:
+        pass
+    # The repository reached through a symlink (`~/work/proj` -> `/data/proj`): `audit`
+    # resolves both sides, and validate must agree, or one read file is a SCOPE GAP here and
+    # supported there.
+    try:
+        return Path(os.path.realpath(q)).relative_to(os.path.realpath(root)).as_posix()
+    except (ValueError, OSError):
         return p
 
 
@@ -1258,7 +1294,8 @@ def validate_findings(doc, manifest=None, repo=None):
         declared = set()
         for entry in doc.get("not_reviewed", []):
             if isinstance(entry, dict) and entry.get("path"):
-                declared.add(str(entry["path"]).strip())
+                # In the manifest's spelling, as files_read is: `./docs/a.md` is `docs/a.md`.
+                declared.add(manifest_spelling(repo, str(entry["path"]).strip()))
                 continue
             # Match a real in-scope path first; only parse one out of the text if none
             # matches. Splitting on whitespace cannot declare `outputs - Copy/note.md` at
@@ -1283,7 +1320,7 @@ def validate_findings(doc, manifest=None, repo=None):
             head = re.split(r"[\s,;:]|—|--", raw, maxsplit=1)[0].strip().rstrip(",")
             head = head.strip("`'\"")
             if head:
-                declared.add(head)
+                declared.add(manifest_spelling(repo, head))
         undeclared = [q for q in sorted(unread) if q not in declared]
         if undeclared:
             v.append(f"SCOPE GAP: {len(unread)} of {len(inscope)} in-scope files not read, "
@@ -1324,7 +1361,9 @@ def validate_findings(doc, manifest=None, repo=None):
                 v.append(f"{tag}: evidence.kind=command but no 'expected'")
             if e.get("cost") not in ("cheap", "heavy"):
                 v.append(f"{tag}: command evidence needs cost=cheap|heavy")
-            if "ran" not in e:
+            if not isinstance(e.get("ran"), bool):
+                # A boolean, not merely present: `ran: null` or `ran: "false"` passed, and
+                # neither is False, so an unrun command could be called certain.
                 v.append(f"{tag}: command evidence needs ran=true|false")
             if e.get("cost") == "heavy" and e.get("ran"):
                 v.append(f"{tag}: HEAVY command was run — forbidden by M-4")
@@ -1407,7 +1446,7 @@ def finding_fingerprint(f, repo: Path):
     p = repo / path if path else None
     if p and p.exists() and isinstance(line, int):
         try:
-            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+            lines = source_lines(p.read_text(encoding="utf-8", errors="replace"))
             if 1 <= line <= len(lines):
                 window = lines[max(0, line - 1): line + 1]
                 strip = p.suffix.lower() in CODE_SUFFIXES
@@ -1609,11 +1648,14 @@ def anchor_present(repo: Path, rel: str, anchor: str, anchor_line: str = ""):
     if not p.exists():
         return False
     try:
-        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = source_lines(p.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return False
     strip = p.suffix.lower() in CODE_SUFFIXES
-    norm = [normalize_anchor(x, strip) for x in lines]
+    # Compared without whitespace: a formatter that turns `x=f(1)` into `x = f(1)` has not
+    # fixed anything, and comparing the spaced forms closed a live defect as plausibly-fixed.
+    norm = [squeeze(normalize_anchor(x, strip)) for x in lines]
+    anchor, anchor_line = squeeze(anchor), squeeze(anchor_line)
 
     if anchor_line:
         hits = sum(1 for x in norm if x and x == anchor_line)
@@ -1627,9 +1669,14 @@ def anchor_present(repo: Path, rel: str, anchor: str, anchor_line: str = ""):
     # distinguish "the defect is gone" from "the line after it changed", so it never
     # answers False — an unverifiable defect stays open rather than closing wrongly.
     for i in range(len(norm)):
-        if " ".join(norm[i:i + 2]).strip() == anchor:
+        if "".join(norm[i:i + 2]) == anchor:
             return True
     return None
+
+
+def squeeze(s: str) -> str:
+    """Text with all whitespace removed, for comparing anchors across a reformat."""
+    return re.sub(r"\s+", "", s or "")
 
 
 def resolve_fingerprints(rec, run_dir: Path):
@@ -1924,20 +1971,41 @@ def cmd_carryover(a):
 
     states = {"re-reported": [], "not-re-checked": [], "plausibly-fixed": [], "missed": []}
 
+    # The fingerprint hashes the defect's line and the one after it, so an edit to the next
+    # line, or a reformat, gives a re-filed defect a new id. Matched on its own line instead,
+    # it is the same defect: the old record is marked superseded and its history moves to the
+    # new id. Without this the old one read as `missed` and the summary listed it twice.
+    moved = {}
+    for fp_, item in this_run.items():
+        a_ = anchors.get(fp_, {})
+        if item.get("disposition") != "dropped" and a_.get("file") and a_.get("anchor_line"):
+            moved.setdefault((a_["file"], squeeze(a_["anchor_line"])), fp_)
+
+    def supersede(fp_, d):
+        new = moved[(d.get("file"), squeeze(d.get("anchor_line")))]
+        d["status"], d["last_outcome"], d["superseded_by"] = "superseded", "superseded", new
+        if new not in known["defects"]:
+            known["defects"][new] = {k: d[k] for k in (
+                "first_run", "missed_in_runs", "reported_not_carried_in_runs") if k in d}
+        states.setdefault("superseded", []).append(fp_)
+
     # 1. everything previously open: classify against the current source.
     #    `anchors` holds every fingerprint filed this run — by the reviewers and by the static
     #    checks; `this_run` holds what the reconciler carried through. A defect present in the
     #    first and absent from the second was not missed — it was dropped downstream. Recording
     #    only "missed" would blame the wrong stage, and the two need different fixes. So
     #    "missed" means that neither a reviewer nor a detector raised it this run.
-    for fp_, d in known["defects"].items():
-        if d.get("status") in ("fixed", "dropped"):
+    for fp_, d in list(known["defects"].items()):
+        if d.get("status") in ("fixed", "dropped", "superseded"):
             continue
         if fp_ in this_run:
             continue  # handled below
         file_ = d.get("file")
         anchor = d.get("anchor", "")
         anchor_line = d.get("anchor_line", "")
+        if anchor_line and (file_, squeeze(anchor_line)) in moved:
+            supersede(fp_, d)
+            continue
         if d.get("status") == "plausibly-fixed":
             # Already resolved once. Only the offending text COMING BACK reopens it — a file
             # dropping out of the review window must never resurrect a fixed defect.
@@ -1986,6 +2054,11 @@ def cmd_carryover(a):
             # human will check; a false "fixed" hides a real defect forever. Staying open is
             # the safe direction, so the anchor is kept narrow and the verdict is soft.
             d["status"] = "open"
+            if d.get("disposition") in ("deferred", "unverifiable"):
+                # Never confirmed, so not raising it again is no reviewer's miss.
+                d["last_outcome"] = "unconfirmed-not-re-raised"
+                states.setdefault("unconfirmed-not-re-raised", []).append(fp_)
+                continue
             d["last_outcome"] = "missed"
             d["missed_in_runs"] = sorted(set(d.get("missed_in_runs", []) + [run_id]))
             states["missed"].append(fp_)
@@ -2010,7 +2083,7 @@ def cmd_carryover(a):
             d["anchor_line"] = anchors[fp_]["anchor_line"]
         d.update({"where": item.get("where"), "severity": item.get("severity"),
                   "class": item.get("class"), "title": item.get("title"),
-                  "last_seen_run": run_id})
+                  "disposition": disp, "last_seen_run": run_id})
         # The outcome follows the disposition. It used to be stamped "re-reported" for every
         # item including the fixed and the refuted ones, so the record said "found again,
         # still open" about a defect it had just marked fixed.
@@ -2042,9 +2115,9 @@ def cmd_carryover(a):
               "check they are genuinely the same defect:")
         for fp_, disps in list(collisions.items())[:6]:
             print(f"    {fp_}  {sorted(disps)}  {known['defects'][fp_].get('where')}")
-    for st in ("re-reported", "reported-not-carried", "missed", "regressed",
-               "unanchored-not-checkable", "anchor-ambiguous", "not-re-checked",
-               "file-deleted", "plausibly-fixed"):
+    for st in ("re-reported", "superseded", "reported-not-carried", "missed", "regressed",
+               "unconfirmed-not-re-raised", "unanchored-not-checkable", "anchor-ambiguous",
+               "not-re-checked", "file-deleted", "plausibly-fixed"):
         if states.get(st):
             print(f"  {st:16} {len(states[st])}")
     if states.get("reported-not-carried"):
@@ -2565,7 +2638,8 @@ def cmd_summarize(a):
                    if d.get("status") == "open" and k not in here
                    and d.get("last_outcome") in ("reported-not-carried",
                                                  "unanchored-not-checkable",
-                                                 "anchor-ambiguous")]
+                                                 "anchor-ambiguous",
+                                                 "unconfirmed-not-re-raised")]
     if missed or unchecked or regressed or undecidable:
         w(f"## Still open from earlier runs "
           f"({len(missed) + len(unchecked) + len(regressed) + len(undecidable)})\n")
@@ -2608,7 +2682,9 @@ def cmd_summarize(a):
             w("|---|---|---|---|")
             reason = {"reported-not-carried": "a reviewer filed it; reconciliation did not carry it",
                       "unanchored-not-checkable": "no source anchor, so presence cannot be tested",
-                      "anchor-ambiguous": "its anchor occurs more than once, so it locates nothing"}
+                      "anchor-ambiguous": "its anchor occurs more than once, so it locates nothing",
+                      "unconfirmed-not-re-raised": "deferred or unverifiable when filed, and "
+                                                   "nobody raised it this run"}
             for d in sorted(undecidable, key=lambda x: order.get(x.get("severity"), 9)):
                 w(f"| `{cell(d.get('where'))}` | {cell(d.get('severity'))} "
                   f"| {cell(d.get('title'))} "
@@ -2699,8 +2775,15 @@ def cmd_ledger(a):
     # One write, not one per row: a crash midway through appending used to leave a partial
     # line, and every later read of the ledger then skipped the truncated row in silence.
     if fresh:
+        # A ledger whose last line was cut short (a crash, a disk full) would otherwise have
+        # the first new row appended onto that fragment, and both lost as one unreadable line.
+        lead = ""
+        if outp.exists() and outp.stat().st_size:
+            with open(outp, "rb") as f:
+                f.seek(-1, os.SEEK_END)
+                lead = "" if f.read(1) == b"\n" else "\n"
         with open(a.out, "a", encoding="utf-8") as f:
-            f.write("".join(json.dumps(row) + "\n" for row in fresh))
+            f.write(lead + "".join(json.dumps(row) + "\n" for row in fresh))
     for row in rows:
         print(f"  {row['reviewer']:18} {row['reported']:3} reported → {row['confirmed']} confirmed, "
               f"{row['refuted']} refuted, {row['deferred']} deferred  "

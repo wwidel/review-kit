@@ -76,7 +76,9 @@ A fifth file in the same shape, `findings-static.json`, is written by `bin/detec
 than by an agent: `reviewer` is `static`, every finding is `likely` — or `speculative` where
 the detector itself is unsure — with the quoted site as evidence, `lines` lists every site as
 comma-separated numbers, and two extra fields, `detector` and `detector_kind`, name the check
-that fired.
+that fired. Where one finding gathers two kinds seen on the same lines (a vectorizer fitted on
+test data is also one fitted twice), `detector_kind` is the most severe of them and a third
+field, `detector_kinds`, lists them all.
 
 ## Field rules
 

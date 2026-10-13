@@ -115,3 +115,31 @@ def test_since_on_a_subdirectory(tmp_path, installed, repo):
 def test_since_and_full_together_are_refused(tmp_path, repo):
     r = scope(repo, tmp_path / "run", "--since", "HEAD", "--full", ok=False)
     assert r.returncode == 2
+
+
+def test_since_keeps_a_changed_non_ascii_file(tmp_path, installed, repo):
+    (repo / "café.py").write_text("x = 1\n")
+    commit(repo, "add")
+    (repo / "café.py").write_text("x = 2\n")
+    commit(repo, "edit")
+    m = scope(repo, tmp_path / "run", "--since", "HEAD~1")
+    assert buckets(m)["review"] == ["café.py"] and m["deleted"] == []
+
+
+def test_since_runs_no_shell(tmp_path, installed, repo):
+    ref = "v1;touch${IFS}PWNED"
+    git(repo, "branch", ref)
+    (repo / "a.py").write_text("changed\n")
+    m = scope(repo, tmp_path / "run", "--since", ref)
+    assert not (repo / "PWNED").exists() and not list(repo.glob("PWNED*"))
+    assert m["mode"] == "since" and buckets(m)["review"] == ["a.py"]
+
+
+def test_every_summary_at_the_root_is_left_out(tmp_path, installed, repo):
+    (repo / "REVIEW-SUMMARY.md").write_text("an older summary\n")
+    (repo / "REVIEW-SUMMARY-1.md").write_text("another\n")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "REVIEW-SUMMARY.md").write_text("not at the root\n")
+    m = scope(repo, tmp_path / "run")
+    assert "docs/REVIEW-SUMMARY.md" in buckets(m)["review"]
+    assert not {"REVIEW-SUMMARY.md", "REVIEW-SUMMARY-1.md"} & set(buckets(m)["review"])

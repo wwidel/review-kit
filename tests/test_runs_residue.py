@@ -1,4 +1,4 @@
-"""`runs` and `residue`: plan bugs 2 and 3."""
+"""`runs` and `residue`."""
 import json
 
 from conftest import load, run

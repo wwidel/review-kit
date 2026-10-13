@@ -1,4 +1,4 @@
-"""A defect keeps its fingerprint while its code is unchanged, and only then (section 7)."""
+"""A defect keeps its fingerprint while its code is unchanged, and only then."""
 import json
 
 from conftest import finding, fingerprints, make_run

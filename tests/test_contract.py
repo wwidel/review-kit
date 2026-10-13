@@ -1,6 +1,6 @@
 """The skills and docs drive review.py by command line, and FINDINGS.md defines what reviewers
 write. A renamed flag or a drifted value would otherwise fail only mid-audit, after the
-tokens are spent (plan section 5)."""
+tokens are spent."""
 import re
 import shlex
 

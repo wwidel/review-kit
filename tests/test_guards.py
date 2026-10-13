@@ -1,4 +1,4 @@
-"""validate's rules, residue's cases and preflight's refusals (plan section 7)."""
+"""validate's rules, residue's cases and preflight's refusals."""
 import errno
 import json
 import os
@@ -81,6 +81,10 @@ RULES = {
     "command without ran": (lambda: with_finding(evidence={k: v for k, v in CMD.items()
                                                             if k != "ran"}),
                             "ran=true|false"),
+    "command with ran null": (lambda: with_finding(evidence=dict(CMD, ran=None)),
+                              "ran=true|false"),
+    "command with ran a string": (lambda: with_finding(evidence=dict(CMD, ran="false")),
+                                  "ran=true|false"),
     "heavy command run": (lambda: with_finding(evidence=dict(CMD, cost="heavy",
                                                              cost_basis="hours")),
                           "HEAVY command was run"),
@@ -113,7 +117,9 @@ def test_a_manifest_without_files_is_reported(repo):
 @pytest.mark.parametrize("entry", [
     "src/m.py — out of time",
     {"path": "src/m.py", "reason": "out of time"},
-    "`src/m.py` — rendered by the summary"])
+    "`src/m.py` — rendered by the summary",
+    "./src/m.py — out of time",
+    {"path": "./src/m.py", "reason": "out of time"}])
 def test_a_declared_unread_file_is_not_a_gap(repo, entry):
     assert problems(repo, doc(scope={"files_read": ["a.py"]}, not_reviewed=[entry])) == []
 
@@ -124,6 +130,25 @@ def test_a_path_with_spaces_can_be_declared(repo):
     d = doc(scope={"files_read": ["a.py"]},
             not_reviewed=["outputs - Copy/note.md — a copy of outputs/"])
     assert problems(repo, d, manifest) == []
+
+
+def test_paths_through_a_symlink_to_the_repository_are_its_files(tmp_path, repo):
+    link = tmp_path / "link"
+    link.symlink_to(repo)
+    d = doc(scope={"files_read": [str(link / "a.py"), str(link / "src" / "m.py")]})
+    assert problems(repo, d) == []
+
+
+def test_probe_survives_files_this_python_cannot_compile(tmp_path, repo):
+    (repo / "z.py").write_bytes(b"x = 1\x00\n")                         # ValueError before 3.12
+    (repo / "deep.py").write_text("x = " + " + ".join(["'a'"] * 5000) + "\n")   # RecursionError on 3.10
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"repo": str(repo), "files": [
+        {"path": "a.py"}, {"path": "z.py"}, {"path": "deep.py"}]}))
+    r = run("review.py", "probe", "--manifest", manifest, "--out", tmp_path / "probes.json")
+    assert r.returncode == 0, r.stderr
+    probes = {p["probe"]: p for p in json.loads((tmp_path / "probes.json").read_text())["probes"]}
+    assert "z.py" in {h["file"] for h in probes["unparseable"]["hits"]}
 
 
 def test_validate_exits_1_and_lists_violations(tmp_path, repo):

@@ -101,7 +101,7 @@ def test_r_script_sampling_without_set_seed(tmp_path):
     ("from sklearn.preprocessing import StandardScaler\ns = StandardScaler()\n"
      "s.fit(np.vstack((train, test_feats)))\n", ["fit-on-train-and-test"]),
     ("from sklearn.feature_extraction.text import TfidfVectorizer\nv = TfidfVectorizer()\n"
-     "a = v.fit_transform(q1)\nb = v.fit_transform(q2)\nsim = cosine(a, b)\n",
+     "a = v.fit_transform(left)\nb = v.fit_transform(right)\nsim = cosine(a, b)\n",
      ["refit-on-different-data"]),
     ("from sklearn.feature_extraction.text import TfidfVectorizer\nv = TfidfVectorizer()\n"
      "a = v.fit_transform(train_text)\nb = v.fit_transform(test_text)\n",
@@ -203,7 +203,7 @@ def test_a_near_miss_writer_is_named(tmp_path):
     {"a.py": "x = pd.read_csv('train.csv')\n"},
     {"a.py": "x = pd.read_csv('data/v2.csv.gz')\n", "data/v2.csv.gz": b"\x1f\x8b"},
     {"a.py": "x = pd.read_csv('feats.csv')\n", "README.md": "Download feats.csv first.\n"},
-    {"run.sh": "java -jar s.jar pred_file=preds.csv\n", "a.py": "p = pd.read_csv('preds.csv')\n"},
+    {"run.sh": "java -jar tool.jar out_file=preds.csv\n", "a.py": "p = pd.read_csv('preds.csv')\n"},
 ])
 def test_inputs_that_are_accounted_for(tmp_path, files):
     assert scan(tmp_path, files, "missing-producer") == []
@@ -223,10 +223,10 @@ def test_a_rule_with_boundaries_is_fine(tmp_path):
 
 
 def test_pandas_replace_with_metacharacters_and_no_regex_flag(tmp_path):
-    code = "df['f'] = df['f'].str.replace('parking ok.', 'parking')\n"
+    code = "df['f'] = df['f'].str.replace('foo bar.', 'foo')\n"
     assert kinds(scan(tmp_path, {"a.py": code}, "regex-corrupts-words")) == \
         ["str-replace-regex-default"]
-    code = "df['f'] = df['f'].str.replace('parking ok.', 'parking', regex=False)\n"
+    code = "df['f'] = df['f'].str.replace('foo bar.', 'foo', regex=False)\n"
     assert scan(tmp_path, {"a.py": code}, "regex-corrupts-words") == []
 
 
@@ -267,7 +267,7 @@ def test_duplicated_imports_are_not_duplicated_logic(tmp_path):
 # ---------------------------------------------------------------- hard-coded-path
 
 @pytest.mark.parametrize("code,expected", [
-    ("p = '~/Kaggle/input/train.json'\n", ["absolute-path"]),
+    ("p = '~/data/input/train.json'\n", ["absolute-path"]),
     ("p = 'D:/python/data'\n", ["absolute-path"]),
     ("p = 'data/train.csv'\n", []),
     ("import os\nos.chdir('/home/me/proj')\n", ["chdir-literal"]),
@@ -279,13 +279,13 @@ def test_hard_coded_path(tmp_path, code, expected):
 def test_a_worker_reading_a_global_set_only_under_main(tmp_path):
     code = """
     from multiprocessing import Pool
-    DST = None
+    TARGET = None
     def work(x):
-        return DST + x
+        return TARGET + x
     def helper(x):
-        return DST
+        return TARGET
     if __name__ == "__main__":
-        DST = "out"
+        TARGET = "out"
         Pool(2).map(work, [1])
     """
     hits = scan(tmp_path, {"a.py": code}, "hard-coded-path")
@@ -293,7 +293,7 @@ def test_a_worker_reading_a_global_set_only_under_main(tmp_path):
 
 
 def test_setwd_in_r(tmp_path):
-    assert kinds(scan(tmp_path, {"a.R": "setwd('D:/kaggle/project')\n"}, "hard-coded-path")) == \
+    assert kinds(scan(tmp_path, {"a.R": "setwd('D:/work/project')\n"}, "hard-coded-path")) == \
         ["absolute-path"]
 
 
@@ -506,8 +506,9 @@ def test_missing_producer_near_misses(tmp_path, files):
     assert scan(tmp_path, files, "missing-producer") == []
 
 
+@pytest.mark.skipif(not hasattr(__import__("os"), "geteuid") or __import__("os").geteuid() == 0,
+                    reason="root reads a file whatever its mode")
 def test_an_unreadable_document_does_not_crash_the_run(tmp_path):
-    import os
     root = tmp_path / "r0"
     root.mkdir()
     (root / "a.py").write_text("x = pd.read_csv('feats.csv')\n")
@@ -517,8 +518,7 @@ def test_an_unreadable_document_does_not_crash_the_run(tmp_path):
         hits = detect.run(root, {"missing-producer"})
     finally:
         (root / "NOTES.md").chmod(0o644)
-    if os.geteuid() != 0:
-        assert kinds(hits) == ["read-without-writer"]
+    assert kinds(hits) == ["read-without-writer"]
 
 
 @pytest.mark.parametrize("code", [
@@ -629,9 +629,9 @@ def test_undefined_names_in_one_file_are_one_finding(tmp_path):
 def test_two_kinds_on_the_same_line_are_one_finding(tmp_path):
     root, d, manifest, doc = static_findings(tmp_path, {
         "a.py": "from sklearn.feature_extraction.text import TfidfVectorizer\n"
-                "train_qs, test_qs = [], []\n"
-                "v = TfidfVectorizer()\na = v.fit_transform(train_qs)\n"
-                "b = v.fit_transform(test_qs)\n"})
+                "train_txt, test_txt = [], []\n"
+                "v = TfidfVectorizer()\na = v.fit_transform(train_txt)\n"
+                "b = v.fit_transform(test_txt)\n"})
     (f,) = doc["findings"]
     assert sorted(f["detector_kinds"]) == ["fit-on-heldout", "refit-on-different-data"]
     assert f["lines"] == "5" and "held-out" in f["claim"] and "again" in f["claim"]
@@ -642,3 +642,201 @@ def test_distinct_messages_of_one_kind_stay_separate(tmp_path):
         "a.py": "from sklearn.cluster import KMeans\nfrom sklearn.decomposition import "
                 "TruncatedSVD\nk = KMeans(3)\ns = TruncatedSVD(2)\n"})
     assert len(doc["findings"]) == 2
+
+
+# ---------------------------------------------------------------- the self-review's cases
+# Each was a false positive or a false negative reproduced on the detectors, or an exemption
+# that no test pinned (a mutation removing it left the suite green).
+
+@pytest.mark.parametrize("code,expected", [
+    # A numpy seed does not seed torch's generator.
+    ("import numpy as np\nfrom torch.utils.data import DataLoader\nnp.random.seed(0)\n"
+     "loader = DataLoader(ds, shuffle=True)\n", ["unseeded-dataloader"]),
+    ("from torch.utils.data import DataLoader\nloader = DataLoader(ds, shuffle=True, generator=g)\n",
+     []),
+    # A docstring that mentions a seeding call does not seed.
+    ('"""Call torch.manual_seed(0) before training."""\n'
+     "from torch.utils.data import DataLoader\nloader = DataLoader(ds, shuffle=True)\n",
+     ["unseeded-dataloader"]),
+    # A variable whose name starts with "random" is not the random module.
+    ("random_rows = df.copy()\nr = random_rows.sample(n=5)\n", ["seedable-call-without-seed"]),
+])
+def test_unseeded_review_cases(tmp_path, code, expected):
+    assert kinds(scan(tmp_path, {"a.py": code}, "unseeded")) == expected
+
+
+def test_a_library_import_does_not_link_a_local_module_of_the_same_name(tmp_path):
+    files = {"train.py": "from torch.utils.data import DataLoader\n"
+                         "loader = DataLoader(ds, shuffle=True)\n",
+             "pkg/data.py": "import torch\ntorch.manual_seed(0)\n"}
+    assert kinds(scan(tmp_path, files, "unseeded")) == ["unseeded-dataloader"]
+
+
+@pytest.mark.parametrize("code,expected", [
+    ("from sklearn.preprocessing import StandardScaler\ns = StandardScaler()\n"
+     "X_train_val = s.fit_transform(X_train_val)\n", []),
+    ("from sklearn.preprocessing import StandardScaler\nimport numpy as np\ns = StandardScaler()\n"
+     "s.fit(np.concatenate([X_train, X_test]))\n", ["fit-on-train-and-test"]),
+    ("from sklearn.preprocessing import Normalizer\nn = Normalizer()\n"
+     "x_test = n.fit_transform(x_test)\n", []),
+])
+def test_fit_outside_fold_review_cases(tmp_path, code, expected):
+    assert kinds(scan(tmp_path, {"a.py": code}, "fit-outside-fold")) == expected
+
+
+def test_a_same_named_function_in_another_file_is_not_a_fitter(tmp_path):
+    files = {"a/prep.py": "from sklearn.preprocessing import StandardScaler\n"
+                          "def preprocess(X):\n    return StandardScaler().fit_transform(X)\n",
+             "b/run.py": "from sklearn.model_selection import train_test_split\n"
+                         "def preprocess(df):\n    return df.dropna()\n"
+                         "X = preprocess(df)\na, b = train_test_split(X, random_state=0)\n"}
+    assert scan(tmp_path, files, "fit-outside-fold") == []
+    # Imported from the module that fits, the same call is a fit before the split.
+    files["b/run.py"] = ("from sklearn.model_selection import train_test_split\n"
+                         "from prep import preprocess as pp\n"
+                         "X = pp(df)\na, b = train_test_split(X, random_state=0)\n")
+    files["b/prep.py"] = files.pop("a/prep.py")
+    assert kinds(scan(tmp_path, files, "fit-outside-fold")) == ["fit-before-split"]
+
+
+@pytest.mark.parametrize("code,expected", [
+    # Overwritten before the first read: the caller's value never matters.
+    ("def train(data, mode='fast'):\n    mode = 'slow'\n    return run(data, mode)\n",
+     ["parameter-overwritten"]),
+    # A default filled in after a check reads the parameter first.
+    ("def train(data, mode=None):\n    if mode is None:\n        mode = 'fast'\n"
+     "    return run(data, mode)\n", []),
+    # An override for one case is not the caller's value ignored.
+    ("def train(data, mode, debug):\n    if debug:\n        mode = 'slow'\n"
+     "    return run(data, mode)\n", []),
+    # A nested function's assignment does not make the outer constant variable.
+    ("def f():\n    flag = True\n    def g():\n        flag = compute()\n        return flag\n"
+     "    if flag:\n        return 1\n", ["constant-condition"]),
+])
+def test_ignored_setting_review_cases(tmp_path, code, expected):
+    assert kinds(scan(tmp_path, {"a.py": code}, "ignored-setting")) == expected
+
+
+def test_an_elif_chain_on_argv_is_reported_once(tmp_path):
+    code = ("import sys\nif sys.argv[1] == 'a':\n    f()\nelif sys.argv[1] == 'b':\n    g()\n"
+            "elif sys.argv[1] == 'c':\n    h()\n")
+    assert kinds(scan(tmp_path, {"a.py": code}, "ignored-setting")) == \
+        ["argv-dispatch-without-else"]
+
+
+def test_a_workflow_file_is_not_a_config_nobody_reads(tmp_path):
+    files = {".github/workflows/ci.yml": "jobs:\n  test:\n    runs-on: ubuntu-latest\n",
+             "a.py": "x = 1\n"}
+    assert scan(tmp_path, files, "ignored-setting") == []
+
+
+@pytest.mark.parametrize("files,expected", [
+    # A documented input is not overridden by a writer of another file type.
+    ({"a.py": "x = pd.read_csv('test_labels.csv')\ny.to_pickle('test.pkl')\n",
+      "README.md": "Download test_labels.csv first.\n"}, []),
+    ({"a.py": "x = pd.read_csv('feats.csv')\n",
+      "b.py": "from pathlib import Path\nwith Path('feats.csv').open('w') as f:\n    f.write('a')\n"},
+     []),
+])
+def test_missing_producer_review_cases(tmp_path, files, expected):
+    assert kinds(scan(tmp_path, files, "missing-producer")) == expected
+
+
+def test_overload_stubs_are_not_redefinitions(tmp_path):
+    code = ("from typing import overload\n@overload\ndef f(x: int) -> int: ...\n"
+            "@overload\ndef f(x: str) -> str: ...\ndef f(x):\n    return x\n")
+    assert scan(tmp_path, {"a.py": code}, "duplicate-code") == []
+
+
+@pytest.mark.parametrize("code,expected", [
+    ("import yaml\nc = yaml.load(open('c.yml'), yaml.SafeLoader)\n", []),
+])
+def test_cannot_run_review_cases(tmp_path, code, expected):
+    assert kinds(scan(tmp_path, {"a.py": code}, "cannot-run")) == expected
+
+
+def test_a_syntax_error_names_the_interpreter(tmp_path):
+    (h,) = scan(tmp_path, {"a.py": "x = f(a=1 b=2)\n"}, "cannot-run")
+    assert f"a syntax error under Python {detect.THIS_PYTHON}" in h.message
+    assert h.confidence == "high"
+
+
+def test_syntax_a_newer_python_accepts_is_not_called_certain(tmp_path, monkeypatch):
+    monkeypatch.setattr(detect, "_compiles_under", lambda text: "3.99")
+    (h,) = scan(tmp_path, {"a.py": "x = f(a=1 b=2)\n"}, "cannot-run")
+    assert "Python 3.99 compiles it" in h.message and h.confidence == "medium"
+
+
+def test_compiles_under_asks_the_newer_interpreters(monkeypatch):
+    import sys
+    monkeypatch.setattr(detect, "_newer_pythons", lambda: [("3.99", sys.executable)])
+    assert detect._compiles_under("x = 1\n") == "3.99"
+    assert detect._compiles_under("x = (\n") is None
+
+
+def test_a_file_too_deep_to_parse_is_held_back_not_a_crash(tmp_path, monkeypatch):
+    import ast
+
+    def deep(*a, **k):
+        raise RecursionError("maximum recursion depth exceeded during compilation")
+
+    class DeepAst:          # detect.py's view of the ast module only, not pytest's
+        parse = staticmethod(deep)
+
+        def __getattr__(self, name):
+            return getattr(ast, name)
+    monkeypatch.setattr(detect, "ast", DeepAst())
+    monkeypatch.setattr(detect, "compile", deep, raising=False)
+    hits = scan(tmp_path, {"a.py": "x = 1\n"}, "cannot-run")
+    assert kinds(hits) == ["unparsed-file"] and "unparsed-file" not in detect.SENT
+
+
+def test_a_long_generated_expression_does_not_crash_the_run(tmp_path):
+    code = "x = " + " + ".join(["'a'"] * 5000) + "\n"
+    assert set(kinds(scan(tmp_path, {"a.py": code}))) <= {"unparsed-file"}
+
+
+@pytest.mark.parametrize("code,expected", [
+    ("p = '~/.config/tool/settings.json'\n", []),
+    ("name = 'x'\np = f'~/{name}'\n", []),
+    ("name = 'x'\np = f'/home/alice/{name}.csv'\n", ["absolute-path"]),
+])
+def test_hard_coded_path_review_cases(tmp_path, code, expected):
+    assert kinds(scan(tmp_path, {"a.py": code}, "hard-coded-path")) == expected
+
+
+def test_two_paths_on_one_line_are_both_in_the_claim(tmp_path):
+    root, d, manifest, doc = static_findings(tmp_path, {
+        "a.py": "PATHS = ['/home/alice/a.csv', '/home/alice/b.csv']\n"})
+    (f,) = doc["findings"]
+    assert "a.csv" in f["claim"] and "b.csv" in f["claim"]
+
+
+def test_an_unknown_detector_name_is_an_error(tmp_path):
+    from conftest import run
+    (tmp_path / "a.py").write_text("x = 1\n")
+    r = run("detect.py", "--repo", tmp_path, "--only", "cannot_run")
+    assert r.returncode == 2 and "unknown detector" in r.stderr
+    r = run("detect.py", "--repo", tmp_path, "--only", "cannot-run")
+    assert r.returncode == 0 and r.stdout.splitlines() == ["cannot-run: 0 hit(s)"]
+
+
+def test_merged_kinds_take_the_judgment_fix_certainty():
+    hs = [detect.Hit("ignored-setting", "case-mismatch-comparison", "a.py", 3, "m1", "q", "high"),
+          detect.Hit("ignored-setting", "constant-condition", "a.py", 3, "m2", "q", "high")]
+    (group,) = detect._group(hs)
+    f = detect._finding(1, group, None)
+    assert f["fix_certainty"] == "judgment" and f["claim"] == "m1; m2"
+    assert sorted(f["detector_kinds"]) == ["case-mismatch-comparison", "constant-condition"]
+
+
+def test_detect_and_fingerprint_number_lines_alike(tmp_path):
+    import json
+    from conftest import run
+    root, d, manifest, doc = static_findings(tmp_path, {
+        "a.py": "from sklearn.cluster import KMeans\n\x0c# section\nk = KMeans(3)\n"})
+    p = d / "findings-static.json"
+    r = run("review.py", "fingerprint", "--findings", p, "--manifest", d / "manifest.json")
+    assert r.returncode == 0, r.stderr
+    (f,) = json.loads(p.read_text())["findings"]
+    assert f["line"] == 3 and f["fingerprint_anchor_line"] == "k = KMeans(3)"

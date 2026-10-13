@@ -402,7 +402,10 @@ def find_matches(args, cwd, state):
     for `audit` to report as unresolved, rather than guessed at.
     """
     dirs, i, name, iname, depth = [], 0, None, None, None
-    while i < len(args) and not args[i].startswith("-"):
+    # The expression starts at its first word that is an option or an operator: `find src !
+    # -name '*.md'` searches src alone, and taking `!` for a directory dropped the negation, so
+    # exactly the excluded files were credited.
+    while i < len(args) and not args[i].startswith("-") and args[i] not in ("!", "(", ")", ","):
         dirs.append(args[i])
         i += 1
     while i < len(args):
@@ -462,6 +465,10 @@ def quiet(name, args):
                 return True
     if name == "cmp" and any(a in ("-s", "--silent", "--quiet") for a in args):
         return True
+    if name == "sed" and any(a == "--in-place" or a.startswith("--in-place=")
+                             or re.fullmatch(r"-[nrEsuz]*i\S*", a) for a in args):
+        # `sed -i` writes its output back into the file and shows the reviewer nothing.
+        return True
     if name == "sort" and any(a == "-o" or a.startswith("--output") or
                               (a.startswith("-o") and len(a) > 2) for a in args):
         # `sort -o out a.py` writes to a file, exactly like `sort a.py > out`.
@@ -473,7 +480,56 @@ def quiet(name, args):
     return False
 
 
+# Options of grep and rg that take a value: a short letter (the value attached, `-A3`, or the
+# next word) and a long name (`--include=x`, or the next word).
+SEARCH_SHORT = {"grep": set("ABCDdefm"), "rg": set("ABCEdefgjMmrTt")}
+SEARCH_LONG = {
+    "grep": {"--after-context", "--before-context", "--context", "--regexp", "--file",
+             "--max-count", "--include", "--exclude", "--exclude-dir", "--exclude-from",
+             "--label", "--binary-files", "--devices", "--directories", "--group-separator"},
+    "rg": {"--after-context", "--before-context", "--context", "--regexp", "--file",
+           "--max-count", "--glob", "--iglob", "--type", "--type-not", "--type-add",
+           "--type-clear", "--max-depth", "--max-filesize", "--replace", "--encoding",
+           "--threads", "--sort", "--sortr", "--ignore-file", "--pre", "--pre-glob", "--engine",
+           "--max-columns", "--context-separator", "--field-match-separator",
+           "--field-context-separator", "--path-separator", "--colors", "--color",
+           "--dfa-size-limit", "--regex-size-limit", "--hostname-bin", "--hyperlink-format"},
+}
+
+
+def search_operands(name, args):
+    """The file operands of a grep or rg command. Its first operand is the pattern, unless
+    -e or -f supplied one: `grep -rn "train.py" docs/` reads docs/, not train.py."""
+    tool = "rg" if name == "rg" else "grep"
+    short, long_ = SEARCH_SHORT[tool], SEARCH_LONG[tool]
+    operands, given, i = [], False, 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--":
+            operands += args[i:]
+            break
+        if a.startswith("--"):
+            opt = a.split("=", 1)[0]
+            given = given or opt in ("--regexp", "--file")
+            if "=" not in a and opt in long_:
+                i += 1
+            continue
+        if a.startswith("-") and len(a) > 1:
+            for k, ch in enumerate(a[1:], 1):
+                if ch in short:
+                    given = given or ch in "ef"
+                    if k == len(a) - 1:
+                        i += 1          # the value is the next word
+                    break               # the rest of the word is the value
+            continue
+        operands.append(a)
+    return operands if given else operands[1:]
+
+
 def credit_args(name, args, cwd, out, state):
+    if name in ("grep", "egrep", "fgrep", "rg"):
+        args = search_operands(name, args)
     if name in ("python", "python3", "node"):
         # The script and paths named in -c code; trailing argv is data passed to it, and
         # `python3 -c 0 a.py b.py` reads neither.
@@ -550,6 +606,10 @@ def git_read(args, cwd, out, state, hidden):
             out.add(hit)
 
 
+# A working directory the parse cannot know. No relative name resolves against it.
+UNKNOWN_CWD = "/nonexistent/review-kit-unknown-cwd"
+
+
 def walk(cmds, cwd, env, out, state, depth=0):
     """Follow a list of simple commands the way the shell would, as far as reading goes.
 
@@ -560,6 +620,7 @@ def walk(cmds, cwd, env, out, state, depth=0):
     the reviewer is credited.
     """
     stack, i, prev_find = [], 0, None
+    dirstack, oldpwd = [], None
     while i < len(cmds):
         c = cmds[i]
         i += 1
@@ -625,12 +686,23 @@ def walk(cmds, cwd, env, out, state, depth=0):
                 hit = resolve(substitute(r, env), cwd)
                 if hit:
                     out.add(hit)
-        if name in ("cd", "pushd"):
-            target = args[0] if args else os.path.expanduser("~")
-            if target != "-":
+        if name in ("cd", "pushd", "popd"):
+            # `cd -` and `popd` return to a directory this command may not have entered; one
+            # set before it, in an earlier call, is not known here. Staying put credited
+            # files in the wrong directory, so an unknown directory resolves nothing.
+            target = args[0] if args else None
+            if name == "popd" or (name == "pushd" and target is None):
+                new = dirstack.pop() if dirstack else UNKNOWN_CWD
+            elif target == "-":
+                new = oldpwd or UNKNOWN_CWD
+            else:
+                target = target or os.path.expanduser("~")
                 q = Path(target) if target.startswith("/") else Path(cwd) / target
-                if q.is_dir():
-                    cwd = str(q.resolve())
+                new = str(q.resolve()) if q.is_dir() else cwd
+            if name == "pushd":
+                dirstack.append(cwd)
+            if new != cwd:
+                oldpwd, cwd = cwd, new
             continue
         if name == "find":
             if "-exec" in args or "-execdir" in args:

@@ -12,31 +12,31 @@ specific defective pattern, so most of its hits should be worth a finding on the
 The second form is how /repo-audit uses it: the precise kinds, within the run's review tier,
 written as a findings document for the reconciler to verify like any reviewer's.
 
-Detectors (and the taxonomy category each targets):
+Detectors:
 
-    unseeded               C1  randomness with no seed: a seedable call without its seed
-                               argument, global RNG use in a file that never seeds, a
-                               commented-out seed, an R script that samples without set.seed
-    fit-outside-fold       A2  a transformer fitted on test data, refitted on different data
-                               (two bases), or fitted before the data is split into folds
-    resample-before-split  A1  rows resampled or duplicated before the train/held-out split
-    ignored-setting        B5  a parameter never read or overwritten by a literal, a condition
-                               on a constant, a string compared in the wrong case, an argv
-                               dispatch with no else, a config key no code reads
-    missing-producer       C2  a file the code reads that nothing writes and nothing provides
-    regex-corrupts-words   B3  a text-cleaning rule that rewrites the middle of common words
-    cannot-run             E1  a syntax error, a name used and never defined, yaml.load
-                               without a Loader
-    duplicate-code         E2  a function defined twice in one scope, identical bodies, and
-                               long duplicated blocks
-    hard-coded-path        F3  absolute or home-directory paths, setwd/chdir to a literal, a
-                               worker global set only under __main__
+    unseeded               randomness with no seed: a seedable call without its seed
+                           argument, global RNG use in a file that never seeds, a
+                           commented-out seed, an R script that samples without set.seed
+    fit-outside-fold       a transformer fitted on test data, refitted on different data
+                           (two bases), or fitted before the data is split into folds
+    resample-before-split  rows resampled or duplicated before the train/held-out split
+    ignored-setting        a parameter never read or overwritten by a literal, a condition
+                           on a constant, a string compared in the wrong case, an argv
+                           dispatch with no else, a config key no code reads
+    missing-producer       a file the code reads that nothing writes and nothing provides
+    regex-corrupts-words   a text-cleaning rule that rewrites the middle of common words
+    cannot-run             a syntax error, a name used and never defined, yaml.load
+                           without a Loader
+    duplicate-code         a function defined twice in one scope, identical bodies, and
+                           long duplicated blocks
+    hard-coded-path        absolute or home-directory paths, setwd/chdir to a literal, a
+                           worker global set only under __main__
 
 Stdlib only. Python 3.10+.
 """
 from __future__ import annotations
 
-import argparse, ast, builtins, hashlib, json, os, re, subprocess, sys, warnings
+import argparse, ast, builtins, hashlib, json, os, re, shutil, subprocess, sys, warnings
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
@@ -232,7 +232,7 @@ def _shallow(st):
 
 def own_nodes(fn):
     """Every node in a function's body, not descending into nested definitions or lambdas."""
-    stack = list(fn.body)
+    stack = [n for n in fn.body if not isinstance(n, DEFS)]
     while stack:
         n = stack.pop()
         yield n
@@ -263,7 +263,7 @@ def tokens(text):
     return set(t for t in WORD_SPLIT.split(text.lower()) if t)
 
 
-# ---------------------------------------------------------------- C1 unseeded
+# ---------------------------------------------------------------- unseeded
 
 # Callables whose randomness is controlled by an argument, and the names that argument takes.
 SEEDED_CALLS = {
@@ -324,16 +324,19 @@ R_RANDOM = re.compile(r"\b(sample|runif|rnorm|rbinom|randomForest|xgb\.cv|xgb\.t
                       r"createDataPartition|createFolds|kmeans|train)\s*\(")
 
 
-def _local_imports(f, by_module):
-    """Repository modules this file imports, by module stem."""
+def _local_imports(f, by_module, local):
+    """Repository modules this file imports, by module stem. An absolute import counts only
+    when its top-level name is a module or directory of the repository (`local`): `from
+    torch.utils.data import DataLoader` does not import the repository's data.py."""
     out = []
     for n in ast.walk(f.tree) if f.tree is not None else []:
         names = []
         if isinstance(n, ast.Import):
-            names = [a.name for a in n.names]
-        elif isinstance(n, ast.ImportFrom) and n.module:
+            names = [a.name for a in n.names if a.name.split(".")[0] in local]
+        elif isinstance(n, ast.ImportFrom) and n.module and (
+                n.level or n.module.split(".")[0] in local):
             names = [n.module] + [f"{n.module}.{a.name}" for a in n.names]
-        elif isinstance(n, ast.ImportFrom):
+        elif isinstance(n, ast.ImportFrom) and not n.module:     # from . import utils
             names = [a.name for a in n.names]
         for name in names:
             for part in (name.split(".")[-1], name.split(".")[0]):
@@ -343,6 +346,15 @@ def _local_imports(f, by_module):
                 near = [g for g in cands if Path(g.rel).parent == Path(f.rel).parent]
                 out += near or (cands if len(cands) == 1 else [])
     return out
+
+
+def _seeds_torch(f):
+    """True if this file's code seeds torch: a seeding call, not a comment or a docstring that
+    mentions one. A file that does not parse is judged by its text."""
+    if f.tree is None:
+        return bool(TORCH_SEED.search(f.text))
+    return any(isinstance(c, ast.Call) and (TORCH_SEED.match(dotted(c.func) + "(") or
+                                            callee(c) in SEED_HELPERS) for c in ast.walk(f.tree))
 
 
 def _active_seeds(f):
@@ -357,16 +369,21 @@ def detect_unseeded(r):
     by_module = {}
     for f in py:
         by_module.setdefault(Path(f.rel).stem, []).append(f)
+    local = set(by_module) | {d for f in py for d in Path(f.rel).parts[:-1]}
     importers = {}
     for g in py:
-        for m in _local_imports(g, by_module):
+        for m in _local_imports(g, by_module, local):
             importers.setdefault(m.rel, []).append(g)
+    seeds_torch = {}
 
     def torch_seeded(f):
         # This file, the modules it imports, and the files that import it: a DataLoader built
         # in data.py is seeded by the train.py that imports it and calls torch.manual_seed.
-        near = [f] + _local_imports(f, by_module) + importers.get(f.rel, [])
-        return any(TORCH_SEED.search(g.text) for g in near)
+        near = [f] + _local_imports(f, by_module, local) + importers.get(f.rel, [])
+        for g in near:
+            if g.rel not in seeds_torch:
+                seeds_torch[g.rel] = _seeds_torch(g)
+        return any(seeds_torch[g.rel] for g in near)
     repo_seeds = any(SEED_CALL.search(f.text) for f in py) or any(
         SEED_CALL.search(t) for _, t in others)
     for f in py:
@@ -400,10 +417,14 @@ def detect_unseeded(r):
                 for c in calls_in(stmts):
                     seeded_from[id(c)] = module_seed
         for node in ast.walk(f.tree):
-            if not isinstance(node, ast.Call) or id(node) in seeded_from:
+            if not isinstance(node, ast.Call):
                 continue
             name = callee(node)
             full = dotted(node.func)
+            # A numpy seed reproduces numpy and what draws from it, sklearn and pandas; a
+            # DataLoader shuffles with torch's generator, which it does not touch.
+            if id(node) in seeded_from and name != "DataLoader":
+                continue
             if name in SEEDED_CALLS and not has_kwargs_splat(node):
                 seeds = SEEDED_CALLS[name]
                 sh = kw(node, "shuffle")
@@ -427,7 +448,7 @@ def detect_unseeded(r):
                                     src(node, f.text)[:160], "high"))
             elif name == "sample" and isinstance(node.func, ast.Attribute) and \
                     (kwnames(node) & {"n", "frac"}) and "random_state" not in kwnames(node) \
-                    and not full.startswith(("random", "np", "numpy")):
+                    and full.split(".")[0] not in ("random", "np", "numpy"):
                 hits.append(Hit("unseeded", "seedable-call-without-seed", f.rel, node.lineno,
                                 ".sample(...) without random_state", src(node, f.text)[:160],
                                 "high"))
@@ -473,7 +494,7 @@ def detect_unseeded(r):
     return hits
 
 
-# ---------------------------------------------------------------- A2 fit outside the fold
+# ---------------------------------------------------------------- fit outside the fold
 
 # A class is taken for a fitted preprocessing step by the end of its name: StandardScaler,
 # OneHotEncoder, TfidfVectorizer, TruncatedSVD. Stateless ones are listed too, so they are
@@ -497,7 +518,15 @@ SPLIT_RECEIVER = {"kf", "skf", "gkf", "fold", "folds", "kfold", "cv", "splitter"
 # Encoders of the target or of a fixed category set: fitting them on every row maps labels to
 # integers and learns nothing a held-out score depends on.
 LABEL_ENCODERS = {"LabelEncoder", "LabelBinarizer", "MultiLabelBinarizer"}
-SIDES = HELDOUT | {"train", "training", "tr", "trn", "tst"}
+TRAIN = {"train", "training", "tr", "trn"}
+SIDES = HELDOUT | TRAIN | {"tst"}
+
+
+def _heldout_only(name):
+    """A name for held-out rows alone: `X_test`, `val_df`; not `X_train_val`, which holds the
+    training rows too."""
+    tk = tokens(name)
+    return bool(tk & HELDOUT) and not tk & TRAIN
 
 
 def _bound_classes(tree, text):
@@ -579,37 +608,88 @@ def _split_line(stmts, text, splitters=frozenset()):
     return None
 
 
-def _fitting_functions(py):
-    """Names of repository functions whose body fits a transformer (one level of calls)."""
+def _imported_names(tree):
+    """{local name: (module, name in that module)} for `from module import name [as local]`,
+    and {"*": [modules]} for star imports."""
+    out = {"*": []}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and n.module:
+            for a in n.names:
+                if a.name == "*":
+                    out["*"].append(n.module)
+                else:
+                    out[a.asname or a.name] = (n.module, a.name)
+    return out
+
+
+def _function_resolver(py):
+    """A function that maps (file, bare called name) to the (file, name) of the repository
+    function it calls: one defined in that file, or imported from a repository module by
+    `from module import name` or `from module import *`. A same-named function in some other
+    file is a different function."""
+    defined = {}
+    by_stem = {}
+    for f in py:
+        if f.tree is None:
+            continue
+        by_stem.setdefault(Path(f.rel).stem, []).append(f)
+        defined[f.rel] = {n.name for n in ast.walk(f.tree)
+                          if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    imports = {f.rel: _imported_names(f.tree) for f in py if f.tree is not None}
+
+    def module_file(f, module):
+        cands = by_stem.get(module.split(".")[-1], [])
+        near = [g for g in cands if Path(g.rel).parent == Path(f.rel).parent]
+        return (near or (cands if len(cands) == 1 else [None]))[0]
+
+    def resolve(f, name):
+        if name in defined.get(f.rel, ()):
+            return (f.rel, name)
+        imp = imports.get(f.rel, {})
+        if name in imp:
+            module, orig = imp[name]
+            g = module_file(f, module)
+            return (g.rel, orig) if g is not None and orig in defined.get(g.rel, ()) else None
+        for module in imp.get("*", []):
+            g = module_file(f, module)
+            if g is not None and name in defined.get(g.rel, ()):
+                return (g.rel, name)
+        return None
+    return resolve
+
+
+def _fitting_functions(py, resolve):
+    """(file, name) of repository functions whose body fits a transformer (one level of
+    calls)."""
     direct = set()
-    defs = {}
+    defs = []
     for f in py:
         if f.tree is None:
             continue
         tv = _transformer_vars(f.tree, f.text)
         for node in ast.walk(f.tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                defs.setdefault(node.name, []).append(node)
+                defs.append((f, node))
                 for c in ast.walk(node):
                     if isinstance(c, ast.Call) and callee(c) in ("fit", "fit_transform") and \
                             isinstance(c.func, ast.Attribute) and (
                                 src(c.func.value, f.text) in tv
                                 or callee(c) == "fit_transform"):
-                        direct.add(node.name)
+                        direct.add((f.rel, node.name))
                         break
     indirect = set()
-    for name, nodes in defs.items():
-        for node in nodes:
-            if any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
-                   and c.func.id in direct for c in ast.walk(node)):
-                indirect.add(name)
+    for f, node in defs:
+        if any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+               and resolve(f, c.func.id) in direct for c in ast.walk(node)):
+            indirect.add((f.rel, node.name))
     return direct | indirect
 
 
 def detect_fit_outside_fold(r):
     py = r.py
     hits = []
-    fitters = _fitting_functions(py)
+    resolve = _function_resolver(py)
+    fitters = _fitting_functions(py, resolve)
     for f in py:
         if f.tree is None:
             continue
@@ -632,7 +712,7 @@ def detect_fit_outside_fold(r):
                         if isinstance(axis, ast.Constant) and axis.value in (1, "columns"):
                             continue    # a row-wise aggregate: no statistic of the rows
                         if tgt_base and _base_name(src(c.func.value, f.text)) == tgt_base and \
-                                tokens(tgt_base) & HELDOUT:
+                                _heldout_only(tgt_base):
                             hits.append(Hit("fit-outside-fold", "heldout-statistic", f.rel,
                                             st.lineno, f"{tgt_base} is filled with a statistic "
                                             "of itself: the value used on held-out rows is "
@@ -656,20 +736,21 @@ def detect_fit_outside_fold(r):
                 if recv in tv or is_transformer(cls) or callee(c) == "fit_transform":
                     fits.append((c, recv, src(c.args[0], f.text), cls))
             for c, recv, arg, cls in fits:
-                combined = re.search(r"\b(concat|vstack|hstack|append|r_|row_stack)\b|\+", arg)
+                combined = re.search(r"\b(concat\w*|cat|vstack|hstack|append|r_|row_stack)\b|\+",
+                                     arg)
                 if tokens(arg) & HELDOUT and combined:
                     hits.append(Hit("fit-outside-fold", "fit-on-train-and-test", f.rel,
                                     c.lineno, f"{recv} is fitted on training and held-out "
                                     f"data together ({arg[:60]})", src(c, f.text)[:160],
                                     "medium"))
-                elif tokens(_base_name(arg)) & HELDOUT and not combined:
+                elif _heldout_only(_base_name(arg)) and not combined:
                     hits.append(Hit("fit-outside-fold", "fit-on-heldout", f.rel, c.lineno,
                                     f"{recv} is fitted on held-out data ({arg[:60]}); its "
                                     "statistics then shape what is scored",
                                     src(c, f.text)[:160], "high"))
             # One transformer fitted twice on different data, where that matters: the two
             # sides of a split (train and test end up in different bases), or two outputs that
-            # are later compared or combined (q1 and q2 vectorised with different weights).
+            # are later compared or combined (two text columns vectorised with different weights).
             # Reusing an encoder on unrelated columns is fine.
             by_recv = {}
             for c, recv, arg, cls in fits:
@@ -703,7 +784,8 @@ def detect_fit_outside_fold(r):
                 recv = src(c.func.value, f.text) if isinstance(c.func, ast.Attribute) else ""
                 fitted_here = name in ("fit", "fit_transform") and recv in tv and \
                     tv[recv] not in LABEL_ENCODERS
-                via_function = isinstance(c.func, ast.Name) and c.func.id in fitters
+                via_function = isinstance(c.func, ast.Name) and \
+                    resolve(f, c.func.id) in fitters
                 if fitted_here or via_function:
                     hits.append(Hit("fit-outside-fold", "fit-before-split", f.rel, c.lineno,
                                     ("a transformer is fitted" if fitted_here else
@@ -713,7 +795,7 @@ def detect_fit_outside_fold(r):
     return hits
 
 
-# ---------------------------------------------------------------- A1 resample before split
+# ---------------------------------------------------------------- resample before split
 
 RESAMPLERS = re.compile(r"(?i)(resample|oversampl|undersampl|smote|fit_resample|"
                         r"random_under|random_over|upsampl|downsampl)")
@@ -764,7 +846,7 @@ def detect_resample_before_split(r):
     return hits
 
 
-# ---------------------------------------------------------------- B5 ignored settings
+# ---------------------------------------------------------------- ignored settings
 
 INTERFACE_ARGS = {"self", "cls", "args", "kwargs", "_"}
 
@@ -777,6 +859,21 @@ def _is_stub(fn):
     body = [s for s in fn.body if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
     return not body or all(isinstance(s, (ast.Pass, ast.Raise)) or (
         isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant)) for s in body)
+
+
+def _overwritten_before_read(fn, p):
+    """The statement of `fn`'s body that assigns a string literal to parameter `p` before any
+    read of it, or None. Only a statement at the top of the body counts: under an `if` it is
+    an override for one case (`if debug: mode = "slow"`), not the caller's value ignored."""
+    for st in fn.body:
+        if isinstance(st, ast.Assign) and str_const(st.value) is not None and any(
+                isinstance(t, ast.Name) and t.id == p for t in st.targets):
+            return st
+        if isinstance(st, DEFS):
+            continue
+        if any(isinstance(n, ast.Name) and n.id == p for n in ast.walk(st)):
+            return None         # read (or rebound some other way) first
+    return None
 
 
 def detect_ignored_setting(r):
@@ -825,7 +922,16 @@ def detect_ignored_setting(r):
                     node.name.startswith("__") and node.name.endswith("__"))
                 reads = set().union(*(_reads(s) for s in node.body)) if node.body else set()
                 for p in params:
-                    if p in INTERFACE_ARGS or p.startswith("_") or p in reads:
+                    if p in INTERFACE_ARGS or p.startswith("_"):
+                        continue
+                    if p in reads:
+                        s = _overwritten_before_read(node, p)
+                        if s is not None:
+                            hits.append(Hit("ignored-setting", "parameter-overwritten", f.rel,
+                                            s.lineno, f"parameter {p!r} of {node.name}() is "
+                                            "overwritten by a literal before it is first read; "
+                                            "the caller's value is ignored",
+                                            src(s, f.text)[:160], "high"))
                         continue
                     overwritten = [s for s in ast.walk(node) if isinstance(s, ast.Assign)
                                    and str_const(s.value) is not None and any(
@@ -913,14 +1019,14 @@ def detect_ignored_setting(r):
     return hits
 
 
-# ---------------------------------------------------------------- C2 missing producer
+# ---------------------------------------------------------------- missing producer
 
 READERS = {"read_csv", "read_table", "read_parquet", "read_pickle", "read_feather", "read_hdf",
            "read_json", "read_excel", "load", "loadtxt", "genfromtxt", "fromfile", "load_npz",
            "imread", "read_pickle", "File"}
 WRITERS = {"to_csv", "to_parquet", "to_pickle", "to_feather", "to_hdf", "to_json", "to_excel",
            "save", "savez", "savez_compressed", "savetxt", "dump", "imwrite", "savefig",
-           "save_npz", "tofile", "write_pred_csv", "write_csv", "write_parquet", "write_ipc",
+           "save_npz", "tofile", "write_csv", "write_parquet", "write_ipc",
            "write_json", "write_ndjson", "write_text", "write_bytes", "save_model", "to_netcdf",
            "to_zarr", "write_table", "savemat", "sink_parquet", "sink_csv"}
 
@@ -929,6 +1035,7 @@ def _is_test_file(rel):
     p = Path(rel)
     return bool({"tests", "test"} & set(p.parts[:-1])) or p.name.startswith("test_") \
         or p.stem.endswith("_test")
+COMPRESSED = {".gz", ".bz2", ".xz", ".zip", ".zst"}
 FILE_TOKEN = re.compile(r"[\w.\-]+\.(?:csv|tsv|txt|json|jsonl|npy|npz|pkl|pickle|pth|pt|bin|"
                         r"h5|hdf5|parquet|feather|zarr|zip|joblib|model|ckpt|yaml|yml|jar)"
                         r"(?:\.(?:gz|bz2|xz|zip|zst))?\b")
@@ -952,6 +1059,17 @@ def _names_in(node, text):
     return out
 
 
+def _type(name):
+    """`train.csv.gz` -> `.csv.gz`, `x.v2.csv` -> `.csv`."""
+    sx = [s.lower() for s in Path(name).suffixes]
+    return "".join(sx[-2:] if len(sx) > 1 and sx[-1] in COMPRESSED else sx[-1:])
+
+
+def _base(name):
+    """`train.csv.gz` -> `train`."""
+    return name[:len(name) - len(_type(name))] if _type(name) else name
+
+
 def detect_missing_producer(r):
     py, others, repo = r.py, r.others, r.root
     reads, writes = {}, set()
@@ -965,6 +1083,19 @@ def detect_missing_producer(r):
             args = node.args[:1] + [k.value for k in node.keywords
                                     if k.arg in ("path", "fname", "file", "filepath_or_buffer",
                                                  "path_or_buf", "f")]
+            if name == "open" and isinstance(node.func, ast.Attribute) and \
+                    not dotted(node.func.value):
+                # Path('x.csv').open('w'): the path is the receiver and the mode comes first.
+                # A module's open (gzip.open, io.open) takes the path first, as below.
+                mode = str_const(node.args[0]) if node.args else str_const(kw(node, "mode"))
+                if mode is not None and not re.fullmatch(r"[rwxabt+U]+", mode):
+                    continue        # ZipFile(...).open('member.csv'): not a mode
+                for nm in _names_in(node.func.value, f.text):
+                    if mode and any(ch in mode for ch in "wax"):
+                        writes.add(nm)
+                    else:
+                        reads.setdefault(nm, (f.rel, node.lineno))
+                continue
             if name in ("open", "File") and node.args:   # File: h5py.File(path, mode)
                 mode = str_const(node.args[1]) if len(node.args) > 1 else str_const(kw(node, "mode"))
                 target = writes if mode and any(ch in mode for ch in "wax") else None
@@ -1022,8 +1153,11 @@ def detect_missing_producer(r):
                 or CONVENTIONAL_INPUTS.match(nm):
             continue
         documented = re.search(r"(?<![\w.])" + re.escape(nm) + r"(?![\w])", docs)
-        near = sorted(w for w in writes if w != nm and (
-            Path(w).stem in Path(nm).stem or Path(nm).stem in Path(w).stem))
+        # A near-miss writer is a file of the same type whose name contains this one's, or
+        # the reverse: features.csv read, features_v2.csv written. test.pkl is not a
+        # near-miss for test_labels.csv.
+        near = sorted(w for w in writes if w != nm and _type(w) == _type(nm) and (
+            _base(w) in _base(nm) or _base(nm) in _base(w)))
         if documented and not near:
             continue        # an input the documentation names: assumed to be downloaded
         msg = f"{nm} is read here, but nothing in the repository writes it and it is not committed"
@@ -1034,7 +1168,7 @@ def detect_missing_producer(r):
     return hits
 
 
-# ---------------------------------------------------------------- B3 regex corrupts words
+# ---------------------------------------------------------------- regex corrupts words
 
 DEFAULT_WORDS = ["thousand", "usage", "woman", "big", "status", "human",
                  "jaguar", "pig", "dig", "gig", "fig", "rig", "wig", "sign", "design", "high",
@@ -1125,7 +1259,7 @@ def detect_regex_corrupts_words(r):
     return hits
 
 
-# ---------------------------------------------------------------- E1 cannot run
+# ---------------------------------------------------------------- cannot run
 
 BUILTINS = set(dir(builtins)) | {"__file__", "__name__", "__doc__", "__spec__", "__builtins__",
                                  "__path__", "__loader__", "__package__", "__annotations__",
@@ -1160,6 +1294,44 @@ def _bound_names(tree):
     return bound
 
 
+THIS_PYTHON = "{}.{}".format(*sys.version_info[:2])
+_NEWER = []
+
+
+def _newer_pythons():
+    """(version, path) of the interpreters on PATH newer than this one, newest first."""
+    if not _NEWER:
+        _NEWER.append([(f"3.{m}", shutil.which(f"python3.{m}"))
+                       for m in range(20, sys.version_info[1], -1) if shutil.which(f"python3.{m}")])
+    return _NEWER[0]
+
+
+def _compiles_under(text):
+    """The newest Python on PATH, newer than this one, that compiles `text`, or None. Syntax
+    is version-dependent: `type X = int` and f"{d["k"]}" are errors on 3.11 and valid on
+    3.12, and the repository may target the newer one."""
+    for version, exe in _newer_pythons():
+        try:
+            r = subprocess.run([exe, "-c", "import sys; compile(sys.stdin.read(), 'f', 'exec')"],
+                               input=text, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if r.returncode == 0:
+            return version
+    return None
+
+
+def _syntax_error(f, line, msg, magic=False):
+    newer = None if magic else _compiles_under(f.text)
+    where = (f"a syntax error under Python {THIS_PYTHON}; Python {newer} compiles it, so it "
+             "fails only on older interpreters" if newer else
+             f"a syntax error under Python {THIS_PYTHON}")
+    return Hit("cannot-run", "syntax-error", f.rel, line,
+               ("an IPython magic in a .py file: " if magic else "") + f"{msg} ({where})",
+               (f.lines[line - 1].strip() if 0 < line <= len(f.lines) else "")[:160],
+               "medium" if newer else "high")
+
+
 def detect_cannot_run(r):
     py = r.py
     hits = []
@@ -1174,14 +1346,15 @@ def detect_cannot_run(r):
                 # Blame an IPython magic only when the error is on its line: a `%` at the start
                 # of a line inside a string is not one.
                 at = e.lineno or 1
-                magic = at if 0 < at <= len(f.lines) and re.match(r"^\s*[%!]\w",
-                                                                 f.lines[at - 1]) else None
-                hits.append(Hit("cannot-run", "syntax-error", f.rel, magic or e.lineno or 1,
-                                ("an IPython magic in a .py file: " if magic else "")
-                                + f"{e.msg}", (f.lines[(magic or e.lineno or 1) - 1].strip()
-                                               if f.lines else "")[:160], "high"))
-            except ValueError as e:
+                magic = 0 < at <= len(f.lines) and bool(re.match(r"^\s*[%!]\w", f.lines[at - 1]))
+                hits.append(_syntax_error(f, at, e.msg, magic))
+            except ValueError as e:     # a null byte, on Python < 3.12
                 hits.append(Hit("cannot-run", "syntax-error", f.rel, 1, str(e), "", "high"))
+            except (RecursionError, MemoryError):
+                # Held back: a generated file nested too deeply for this parser says nothing
+                # about whether Python can run it.
+                hits.append(Hit("cannot-run", "unparsed-file", f.rel, 1, "nested too deeply "
+                                "for the static checks to parse; not checked", "", "medium"))
             continue
         try:
             # compile() finds what ast.parse lets through: `return` outside a function, a
@@ -1190,11 +1363,8 @@ def detect_cannot_run(r):
                 warnings.simplefilter("ignore")
                 compile(f.text, f.rel, "exec")
         except SyntaxError as e:
-            at = e.lineno or 1
-            hits.append(Hit("cannot-run", "syntax-error", f.rel, at, e.msg,
-                            (f.lines[at - 1].strip() if 0 < at <= len(f.lines) else "")[:160],
-                            "high"))
-        except ValueError:
+            hits.append(_syntax_error(f, e.lineno or 1, e.msg))
+        except (ValueError, RecursionError, MemoryError):
             pass
         star = any(isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names)
                    for n in ast.walk(f.tree))
@@ -1220,7 +1390,7 @@ def detect_cannot_run(r):
     return hits
 
 
-# ---------------------------------------------------------------- E2 duplicate code
+# ---------------------------------------------------------------- duplicate code
 
 def detect_duplicate_code(r, min_block=12):
     py, others = r.py, r.others
@@ -1233,12 +1403,16 @@ def detect_duplicate_code(r, min_block=12):
             seen = {}
             for st in scope.body:
                 if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    # The implementation after a run of @overload stubs is undecorated, so
+                    # the earlier definition's decorators count too.
                     if st.name in seen and not any(dotted(d).endswith(("setter", "overload",
                                                                          "register"))
                                                    or (isinstance(d, ast.Attribute) and
                                                        d.attr in ("setter", "deleter"))
-                                                   for d in st.decorator_list):
-                        first = seen[st.name]
+                                                   for d in st.decorator_list) and not any(
+                            dotted(d).endswith("overload")
+                            for d in seen[st.name].decorator_list):
+                        first = seen[st.name].lineno
                         used_between = any(
                             isinstance(n, ast.Name) and n.id == st.name and
                             isinstance(n.ctx, ast.Load) and first < n.lineno < st.lineno
@@ -1249,7 +1423,7 @@ def detect_duplicate_code(r, min_block=12):
                                            "everything after uses the other" if used_between
                                            else "this definition is dead"),
                                         f.lines[first - 1].strip()[:160], "high"))
-                    seen[st.name] = st.lineno
+                    seen[st.name] = st
         for n in ast.walk(f.tree):
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and len(n.body) >= 3:
                 key = hashlib.sha1(ast.dump(ast.Module(body=n.body, type_ignores=[])).encode()
@@ -1298,7 +1472,7 @@ def detect_duplicate_code(r, min_block=12):
     return hits
 
 
-# ---------------------------------------------------------------- F3 hard-coded paths
+# ---------------------------------------------------------------- hard-coded paths
 
 ABS_PATH = re.compile(r"^(?:~/|/home/|/Users/|/mnt/|/media/|/data/|/root/|/opt/|/srv/|"
                       r"[A-Za-z]:[\\/])")
@@ -1314,10 +1488,15 @@ def detect_hard_coded_path(r):
                       and dotted(c.func) == "os.chdir" and c.args}
         for n in ast.walk(f.tree):
             s = str_const(n)
-            if s and ABS_PATH.match(s) and "\n" not in s and len(s) < 300 \
-                    and id(n) not in chdir_args:
+            m = ABS_PATH.match(s) if s else None
+            # Not a per-user dot-directory (~/.cache, ~/.config/tool.json): it is where the
+            # tool keeps its files on every machine. Not a prefix with nothing after it, the
+            # constant part of f"~/{name}", which says nothing about the machine.
+            if m and "\n" not in s and len(s) < 300 and id(n) not in chdir_args \
+                    and not s.startswith("~/.") and s[m.end():].strip("/\\"):
                 hits.append(Hit("hard-coded-path", "absolute-path", f.rel, n.lineno,
-                                f"a machine-specific path: {s!r}", s, "high"))
+                                f"a machine-specific path: {s!r}",
+                                f.lines[n.lineno - 1].strip()[:160], "high"))
             if isinstance(n, ast.Call) and dotted(n.func) == "os.chdir" and n.args and \
                     str_const(n.args[0]):
                 hits.append(Hit("hard-coded-path", "chdir-literal", f.rel, n.lineno,
@@ -1347,8 +1526,9 @@ def detect_hard_coded_path(r):
                     for g in sorted(used):
                         hits.append(Hit("hard-coded-path", "fork-only-global", f.rel, fn.lineno,
                                         f"{fn.name}() reads the global {g!r}, which is only set "
-                                        "under __main__: worker processes started with spawn "
-                                        "(macOS; Linux from Python 3.14) see its initial value",
+                                        "under __main__: workers started with spawn or "
+                                        "forkserver (the default on macOS and Windows, and on "
+                                        "Linux from Python 3.14) see its initial value",
                                         f"def {fn.name}", "medium"))
     for rel, text in others:
         for i, line in enumerate(split_lines(text), 1):
@@ -1401,7 +1581,7 @@ def load(repo: Path, extra=()):
                     # not this tool's output.
                     warnings.simplefilter("ignore")
                     tree = ast.parse(text)
-            except (SyntaxError, ValueError):
+            except (SyntaxError, ValueError, RecursionError, MemoryError):
                 tree = None
             py.append(PyFile(rel, text, tree, split_lines(text)))
         else:
@@ -1499,8 +1679,12 @@ def _finding(n, hs, repo):
                  f"{', '.join(names)} — it can only run where something else defines them"
                  if len(names) > 1 else first.message)
     else:
-        claim = "; ".join(dict.fromkeys(h.message for h in hs if h.kind != first.kind or
-                                        h is first))
+        # One message per distinct statement: two paths on one line are two, the same
+        # unseeded call at lines 4 and 9 is one.
+        msgs = {}
+        for h in hs:
+            msgs.setdefault(re.sub(r"\b\d+\b", "#", h.message), h.message)
+        claim = "; ".join(msgs.values())
         if len(lines) > 1:
             claim += f" (lines {', '.join(map(str, lines))})"
         if len(kinds) > 1:
@@ -1592,7 +1776,11 @@ def main():
                  if w.strip().isalpha() and len(w.strip()) > 2]
     extra = [x["path"] for x in (manifest or {}).get("files", []) + (manifest or {}).get(
         "reference", [])]
-    hits = run(repo, set(a.only.split(",")) if a.only else None, words, extra)
+    only = {x.strip() for x in a.only.split(",") if x.strip()} if a.only else None
+    if only and only - set(DETECTORS):
+        ap.error(f"unknown detector(s): {', '.join(sorted(only - set(DETECTORS)))}; "
+                 f"choose from {', '.join(DETECTORS)}")
+    hits = run(repo, only, words, extra)
     if a.json:
         Path(a.json).write_text(json.dumps([asdict(h) for h in hits], indent=1))
     if a.findings:
@@ -1609,6 +1797,8 @@ def main():
     for h in hits:
         by.setdefault(h.detector, []).append(h)
     for name in DETECTORS:
+        if only and name not in only:
+            continue
         lst = by.get(name, [])
         print(f"{name}: {len(lst)} hit(s)")
         for h in lst[:40]:

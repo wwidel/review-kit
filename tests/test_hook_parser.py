@@ -1,4 +1,4 @@
-"""What the hook credits as read, and what audit then concludes (plan section 4).
+"""What the hook credits as read, and what audit then concludes.
 
 Every "credits nothing" case is also run through audit, because a command that credits
 nothing but still counts as a reading command turns a false claim into UNRESOLVED (exit 3),
@@ -56,6 +56,15 @@ CREDITS = [
     ("echo '#' && cat a.py", ["a.py"]),
     ("if true; then cat a.py; fi", ["a.py"]),
     ("for f in a.py; do for g in b.py; do cat $g; done | wc -l; cat $f; done", ["a.py"]),
+    # The pattern is not a file operand; an option's value is not the pattern.
+    ("grep -rn y b.py", ["b.py"]),
+    ("grep -A 3 y b.py", ["b.py"]),
+    ("grep -e a.py b.py", ["b.py"]),
+    ("rg -g '*.py' y b.py", ["b.py"]),
+    ("grep y -- b.py", ["b.py"]),
+    # cd - and popd go back where the command itself came from.
+    ("cd src && cd .. && cd - && cat m.py", ["src/m.py"]),
+    ("pushd src && popd && cat a.py", ["a.py"]),
 ]
 
 
@@ -90,6 +99,10 @@ NOTHING = [
     ("if true; then cat a.py; fi > /dev/null", "a.py", True),
     ("for f in a.py; do for g in b.py; do cat $g; done; cat $f; done | wc -l", "b.py", True),
     ("while read l; do echo $l; done < a.py", "a.py", True),
+    ("grep -rn a.py docs", "a.py", True),            # a.py is the pattern
+    ("cd - && cat a.py", "a.py", True),              # back to a directory set before this command
+    ("find src ! -name '*.md' -exec cat {} +", "src/README.md", True),
+    ("sed -i s/x/y/ a.py", "a.py", True),            # writes the file back, shows nothing
 ]
 
 

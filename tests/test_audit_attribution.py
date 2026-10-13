@@ -1,4 +1,4 @@
-"""Which access records may support a claim: decisions 3a and 3b of the test plan."""
+"""Which access records may support a claim, and which may not."""
 from conftest import audit_case
 
 

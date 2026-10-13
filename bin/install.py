@@ -273,9 +273,14 @@ def install_hook():
 
     # Via a temp file and rename: these are the user's settings, and a crash between truncate
     # and write leaves them with the malformed file this function warns about above.
-    tmp = SETTINGS.with_name(SETTINGS.name + ".tmp")
+    # Through a symlink to its target: a settings.json kept in a dotfiles repository is a
+    # link, and renaming over the link replaced it with a plain file. The mode is kept too.
+    target = SETTINGS.resolve()
+    tmp = target.with_name(target.name + ".tmp")
     tmp.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, SETTINGS)
+    if target.exists():
+        shutil.copymode(target, tmp)
+    os.replace(tmp, target)
     return cmd
 
 

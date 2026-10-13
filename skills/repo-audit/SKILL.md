@@ -229,8 +229,9 @@ unread code that this whole design exists to prevent.
 Non-negotiable properties. Every one of these has a way of eroding under time pressure, and
 each erosion silently converts this into an ordinary single-agent review:
 
-- **No reviewer sees another's output, prompt, or existence.** Do not tell them they are part of
-  an audit, do not mention what the others cover, and do not pass one's findings to another.
+- **No reviewer sees another's output or prompt.** The skills describe the division of labour —
+  which reviewer owns which question — and that is all a reviewer learns of the others. Add
+  nothing to it in the prompt: not what the others cover beyond that, and never one's findings.
   Running them one after another does not change this: the second reviewer must not be told
   that a first one ran, still less what it found. Sequential execution is a budget decision,
   not a pipeline — independence is unaffected because each context starts empty either way.
@@ -339,7 +340,7 @@ for f in $D/findings-*.json; do
   python3 <review-kit>/bin/review.py validate --findings $f --manifest $D/manifest.json || {
     case "$f" in
       # No agent wrote it, so there is nobody to re-run: set it aside and report it.
-      *findings-static.json) mv "$f" "$D/static-invalid.json"
+      *findings-static.json) mv "$f" "$STORE/static-invalid-$RUN.json"   # out of $D
                              echo "STATIC CHECKS INVALID: set aside — say so in the handover" ;;
       *) echo "VALIDATION FAILED: $f — re-run that reviewer once, quoting this output" ;;
     esac
@@ -457,7 +458,8 @@ Relay the reconciler's report to the user. Add nothing of your own except:
   decision for the user and it should never be buried in the report's tail.
 - Any movement in the ledger's confirmation rates since the last few runs.
 
-Then stop. The fixes are in the working tree, uncommitted; committing is the user's call.
+Then stop. Nothing in the working tree changed except the summary; committing it is the
+user's call.
 (`G-1`, `A-4`)
 
 ## When not to use this

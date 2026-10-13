@@ -1,4 +1,4 @@
-"""How audit matches a declared path to the log: plan bug 4, and reads through symlinks."""
+"""How audit matches a declared path to the log, including reads through symlinks."""
 import pytest
 
 from conftest import audit_case, hook, records

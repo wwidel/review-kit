@@ -1,4 +1,4 @@
-"""coverage replay (bug 6), the reconciliation check (bugs 7 and 9), ledger and summarize."""
+"""coverage replay, the reconciliation check, ledger and summarize."""
 import json
 import re
 
@@ -143,6 +143,16 @@ def test_ledger_replay_appends_nothing(tmp_path, reconciled):
     r = run("review.py", *STAGES["ledger"](d, tmp_path))
     assert r.returncode == 0 and "replay" in r.stderr
     assert (tmp_path / "ledger.jsonl").read_text() == before
+
+
+def test_a_truncated_last_line_does_not_swallow_the_next_row(tmp_path, reconciled):
+    d, fp = reconciled
+    (tmp_path / "ledger.jsonl").write_text('{"run_id": "R0", "reviewer": "co')
+    write_reconciliation(d, [item(fp["c1"], "a.py:2")])
+    r = run("review.py", *STAGES["ledger"](d, tmp_path))
+    assert r.returncode == 0, r.stderr
+    lines = (tmp_path / "ledger.jsonl").read_text().splitlines()
+    assert json.loads(lines[-1])["run_id"] == "R1" and len(lines) == 2
 
 
 def test_summary_headers_match_their_items(tmp_path, reconciled):

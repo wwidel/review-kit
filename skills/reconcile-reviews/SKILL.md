@@ -79,7 +79,9 @@ usually quick — a syntax error compiles or it does not, a `random_state` is pa
 not. Refute freely: the detectors have known false-positive shapes — an input the README
 downloads, a file written through a computed path, a seed set somewhere the detector did not
 follow, a text rule that rewrites characters on purpose, a fit the author meant to be
-transductive. Never take the static checks' silence as evidence of anything; they look for a
+transductive. A syntax error names the Python that found it: check the construct against the
+version the repository targets (`requires-python`, its CI), because nested f-string quotes and
+`type` statements are errors before 3.12 and valid after. Never take the static checks' silence as evidence of anything; they look for a
 few patterns and nothing else.
 
 When a static finding is the same defect as a reviewer's, put `static` in that item's
@@ -189,10 +191,6 @@ Where you confirm a defect but doubt the remedy, report the defect and say the p
 unconvincing, with why. Being right about a problem does not make a reviewer right about its
 cure, and that holds for you too.
 
-**Drop**, with a one-line note in the ledger: everything `REFUTED` — and anything raised against
-a rule the repository's `REVIEW-RULES.md` records as *deliberately declined*. That is not a
-defect, it is a difference of standard, and the team already answered it.
-
 ## Stage 4 — Report
 
 **Write nothing into the repository under review** except the summary that `summarize`
@@ -251,10 +249,10 @@ STILL OPEN FROM EARLIER RUNS (2)
 
 LEDGER                             confirmed / (confirmed + refuted)
   fresh-eyes        5 reported → 4 confirmed, 1 refuted                               (80%)
-  review-code      12 reported → 8 confirmed, 2 refuted, 1 unverifiable, 1 deferred   (80%)
-  review-analysis   6 reported → 3 confirmed, 1 refuted, 2 deferred                   (75%)
-  review-docs       4 reported → 3 confirmed, 1 refuted                               (75%)
-  Totals: 27 reported → 18 confirmed (4 applied, 14 to you) · 5 refuted · 1 open · 3 deferred
+  code             12 reported → 8 confirmed, 2 refuted, 1 unverifiable, 1 deferred   (80%)
+  analysis          6 reported → 3 confirmed, 1 refuted, 2 deferred                   (75%)
+  docs              4 reported → 3 confirmed, 1 refuted                               (75%)
+  Totals: 27 reported → 18 confirmed, all to you · 5 refuted · 1 unverifiable · 3 deferred
   Carried from earlier runs: 1 missed, 1 not re-checked
   Corroborated across reviewers: 2
   Machine: 4 cores / 3 GB / no GPU
@@ -278,8 +276,8 @@ Rules for the report:
   nobody raised this run, is the single most important line you can write — it is the only
   measurement anyone has of what the reviewers fail to see.
 - **Make the counts add up, and check that they do before sending.** Reported must equal
-  confirmed plus refuted plus unverifiable plus deferred, and confirmed must equal applied plus
-  the items handed to the human. You are the last reader of a document full of numbers; a report
+  confirmed plus refuted plus unverifiable plus deferred, and confirmed must equal the items
+  handed to the human. You are the last reader of a document full of numbers; a report
   whose own arithmetic does not close is not one the human should trust about anyone else's.
   (`N-13`)
 
@@ -317,7 +315,9 @@ source anchor rather than the reviewers' word:
 | `not-re-checked` | its file was outside this run's review tier — carried forward, unverified |
 | `plausibly-fixed` | its file was reviewed and the offending source is gone |
 | `file-deleted` | its file no longer exists and this run scoped the whole repository, so it was deleted rather than left out of a window — deletion removes the defect. Never concluded on a `--since` run, where absence means out-of-window |
-| `fixed-this-run` / `refuted-this-run` | the reconciliation applied a fix for it, or refuted it, in this run |
+| `refuted-this-run` | the reconciliation refuted it in this run (`fixed-this-run` appears only in records from runs made when the reconciler still edited files) |
+| `superseded` | the same defect was filed again this run under a new fingerprint — the line after it changed, or it was reformatted — so its history moved to the new id, named in `superseded_by` |
+| `unconfirmed-not-re-raised` | it was `deferred` or `unverifiable` when filed, its source is unchanged, and nobody raised it this run — never confirmed, so not a reviewer's miss |
 | `regressed` | it had been `plausibly-fixed`, its file was reviewed again, and the offending source is back |
 | `reported-not-carried` | a reviewer filed it again this run, but reconciliation did not carry it through — a downstream drop or a cluster that swallowed it, not a reviewer false negative |
 | `unanchored-not-checkable` | it has no source anchor (a repo-wide or prose-level defect), so presence cannot be tested; never auto-closed, because silence is not evidence of a fix |
@@ -343,8 +343,10 @@ each one before you report it, because two different things land here:
 The tool errs toward `missed` on purpose: a false `missed` costs one line in a report a human
 checks, whereas a false `plausibly-fixed` hides a real defect forever. Your job is to resolve
 which it is. Report the genuine ones under the reviewers rather than under the code — they say
-something about the review, not the repository — and move the fixed ones to `applied` or drop
-them with a note.
+something about the review, not the repository — and say in the report which ones are fixed,
+and by what. No disposition closes them: the record keeps a defect open until its anchored line
+itself changes, so a fixed one next to its anchor comes back as `missed`, and the report is where
+you say why.
 
 `plausibly-fixed` is called *plausibly* on purpose. The anchor being gone means the offending
 text changed, not that the change was correct. Where a plausibly-fixed defect was critical,
@@ -375,7 +377,7 @@ required — `summarize` refuses the file without them rather than dying on a mi
 Each item in `items`:
 
 ```json
-{"fingerprint": "…", "disposition": "applied|open|deferred|unverifiable|dropped",
+{"fingerprint": "…", "disposition": "open|deferred|unverifiable|dropped",
  "severity": "critical", "class": "defect", "title": "one line",
  "where": "src/pkg/refit.py:88", "defect": "one or two sentences",
  "verified_by": "the command or measurement that settled it",
@@ -431,7 +433,7 @@ The `ledger` command in Stage 5 has already appended this run's rows. Your job h
 shaped like:
 
 ```json
-{"run_id": "...", "date": "...", "reviewer": "review-code",
+{"run_id": "...", "date": "...", "reviewer": "code",
  "reported": 12, "confirmed": 9, "refuted": 2, "deferred": 0, "unverifiable": 1,
  "rate_verifiable": 0.818,
  "machine": {"cores": 4, "usable_gb": 3, "gpu": null}}
@@ -439,8 +441,8 @@ shaped like:
 
 One row per reviewer named in a finding's `corroborated_by`, so a finding two reviewers raised
 counts once for each — the rows are per-reviewer tallies and do not sum to the run's finding
-count. `confirmed` counts both `open` and `applied` dispositions, since a fix that was applied
-was first confirmed; the ledger does not record separately how many were applied. A finding
+count. `confirmed` counts `open` items, and `applied` ones in reconciliations from runs made
+when the reconciler still edited files. A finding
 carrying no `corroborated_by` at all is tallied under the reviewer name `(unattributed)`,
 which is itself worth reading: it means the reconciliation lost track of who filed what.
 

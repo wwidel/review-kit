@@ -135,7 +135,8 @@ summaries and the hook line stay.
 
 It is left alone. The install claims the first free name — `REVIEW-SUMMARY-1.md`, and so on —
 records the choice, and every later run reuses it. Nothing in your working tree is ever
-overwritten by an install.
+overwritten by an install. Like the kit's own summary, every `REVIEW-SUMMARY*.md` at the root
+is left out of a review's scope, and reviewers are told not to read it.
 
 ## The documents
 
@@ -210,7 +211,7 @@ review/
   access.jsonl        every file a tool touched, and every reading command, written by the
                       hook, not by any agent
   runs/<run-id>/      manifest, machine, repo_profile, probes, per-reviewer findings,
-                      clusters, recurrence, reconciliation.json and tree-before.json
+                      the static checks' findings-static.json, clusters, recurrence, reconciliation.json and tree-before.json
 ```
 
 ## Run
@@ -264,7 +265,8 @@ reconcile.
 
 Agents find defects, verify defects and decide fixes. **Scripts do everything else** — scoping,
 the mechanical checks, contract validation, fingerprints, clustering, coverage, the summary and
-the ledger. Every failure this kit has actually suffered was in the bookkeeping half, never the
+the ledger. The static checks are the one script that proposes defects, and the reconciler
+verifies each before it can reach the summary. Every failure this kit has actually suffered was in the bookkeeping half, never the
 judgement half.
 
 Five things carry the design, and **[DESIGN.md](DESIGN.md) explains each with the evidence
@@ -332,8 +334,8 @@ Details worth knowing about `REVIEW-RULES.md`:
   and the reconciler drops one that slips through rather than re-litigating it.
 - **It is reviewed like any other document.** It sits in the review tier, so `review-docs` reads
   it as prose as well as rules — a rules file that has gone stale is a real defect, and this is
-  how it gets caught. (`REVIEW-SUMMARY.md` is the one file `scope` leaves out, because it is the
-  kit's own output rather than yours.)
+  how it gets caught. (`REVIEW-SUMMARY*.md` at the root is the one thing `scope` leaves out,
+  because it is the kit's own output rather than yours.)
 - **The template ships blank.** Its adoption table has an empty `adopted?` column and the
   instruction is to delete the rows that are not true of your repository. Until you edit it, a
   reviewer cannot tell "we adopted nothing" from "nobody has filled this in" — so fill it in, or
@@ -397,7 +399,8 @@ review-kit/
 
 Every command that needs to know which repository it is working on reads that from the
 manifest or run directory it was given, so none of them depends on the shell's current
-directory. Five require `--repo` — `preflight`, `store`, `scope`, `characterize` and `audit` — because
+directory. Seven require `--repo` — `preflight`, `store`, `runs`, `residue`, `scope`,
+`characterize` and `audit` — because
 at those points there is no manifest or run directory for them to read it from. This matters when the kit and the repository under review
 are different checkouts: you can drive a review of any repo from anywhere, and pointing a
 command at the wrong tree takes a deliberate `--repo` override.
@@ -405,7 +408,8 @@ command at the wrong tree takes a deliberate `--repo` override.
 `bin/review.py` does every part of a review that does not require judgement. Agents find
 defects, verify defects and decide fixes; the script does the rest. This split is not
 tidiness — every failure the kit has actually suffered in practice was in the bookkeeping
-half, not the judgement half.
+half, not the judgement half. `bin/detect.py` is the one exception: it files
+defects, but only as findings the reconciler verifies.
 
 | command | does |
 |---|---|

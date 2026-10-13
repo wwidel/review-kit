@@ -223,7 +223,7 @@ review-docs: 11 findings (0 critical, 4 major, 7 minor) · 9/86 blocks opaque (1
 Do not print the findings. **Do not edit anything, including typos.** Standalone file review
 fixes trivia in place; inside this kit you do not, because your edits would invalidate the
 line numbers the other reviewers are citing concurrently. File them as `mechanical` findings
-and let the reconciler apply them. (`R-3`)
+and let the reconciler report them. (`R-3`)
 
 If the scope is clean, file nothing and say so. Do not manufacture nitpicks to seem thorough —
 the `denominators` field is what proves you did the work.

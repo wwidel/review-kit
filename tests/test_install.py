@@ -1,4 +1,4 @@
-"""install.py and --uninstall, against a temporary HOME (plan section 6, bugs 1 and 8)."""
+"""install.py and --uninstall, against a temporary HOME."""
 import json
 import os
 import shutil
@@ -109,6 +109,20 @@ def test_the_users_empty_entry_and_extra_keys_on_our_hook_survive(home, repo):
     before = settings(home).read_bytes()
     assert install(KIT, "--repo", repo, cwd=repo).returncode == 0
     assert settings(home).read_bytes() == before
+
+
+def test_a_symlinked_settings_file_stays_a_link_with_its_mode(home, repo, tmp_path):
+    real = tmp_path / "dotfiles" / "settings.json"
+    real.parent.mkdir()
+    real.write_text('{"theme": "dark"}\n')
+    real.chmod(0o600)
+    settings(home).parent.mkdir(parents=True)
+    settings(home).symlink_to(real)
+    assert install(KIT, "--repo", repo, cwd=repo).returncode == 0
+    assert settings(home).is_symlink() and os.readlink(settings(home)) == str(real)
+    cfg = json.loads(real.read_text())
+    assert cfg["theme"] == "dark" and cfg["hooks"]["PostToolUse"]
+    assert real.stat().st_mode & 0o777 == 0o600
 
 
 def test_existing_settings_are_merged_and_kept(home, repo):

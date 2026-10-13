@@ -24,6 +24,8 @@ it is defending against, and what has actually been measured rather than hoped f
                  └────┬─────┘└────┬────┘└────┬─────┘└────┬────┘
                       └───────────┴──────────┴───────────┘
                                    │  findings-*.json   (one schema, evidence required)
+                                   │◀── static checks: findings-static.json, run after
+                                   │    the reviewers so none sees them
                                    ▼
                     ┌──────────────────────────────────────┐
   THE GATE          │ validate    contract, scope honesty   │   ← a reviewer that fails
@@ -50,7 +52,9 @@ it is defending against, and what has actually been measured rather than hoped f
 ```
 
 The split is deliberate: **agents find defects, verify defects and decide fixes. Scripts do
-everything else.** Every failure this kit has actually suffered was in the bookkeeping half —
+everything else.** The static checks are the one script that proposes defects: patterns with a
+fixed syntactic shape, filed as findings that the reconciler verifies like any reviewer's, so no
+defect reaches the summary on a script's word alone. Every failure this kit has actually suffered was in the bookkeeping half —
 a reviewer violating the contract, a reviewer overstating what it read, counts that did not add
 up, fingerprints an agent retyped and abbreviated. None was in the judgement half.
 

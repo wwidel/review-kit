@@ -1,5 +1,5 @@
 """Every scripted stage of a review, in the order the skills call them, with canned agent
-output in place of the reviewers and the reconciler (plan section 3).
+output in place of the reviewers and the reconciler.
 
 Each stage reads files earlier stages wrote, so this is what catches one stage changing a
 format another depends on. The order is the skills': repo-audit Stages 0-4, reconcile-reviews
