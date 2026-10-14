@@ -82,11 +82,12 @@ field, `detector_kinds`, lists them all.
 
 ## Field rules
 
-**`rule_id`** — the rule this violates, or `null`. Three sources, in precedence order: a `P-`
-rule from the repository's own `REVIEW-RULES.md`, a rule from the kit's `PRACTICES.md`, or
-nothing. A finding with no rule is fine and often the most interesting kind; do not invent a rule
-to fill the field, and never raise a finding *because* a repository has not adopted the kit's
-defaults — adoption is optional by design.
+**`rule_id`** — the rule this violates, or `null`. Two sources, in precedence order: a `P-` rule
+from the repository's own `CLAUDE.md`, then a rule from the kit's `PRACTICES.md`; otherwise
+`null`. A rule the repository's `CLAUDE.md` declines is not cited and not raised. A finding with
+no rule is fine and often the most interesting kind; do not invent a rule to fill the field, and
+never raise a finding *because* a repository has not adopted the kit's defaults — adoption is
+optional by design.
 
 **`scope.files_read` vs `scope.files_queried`** — the manifest sorts every file into one of
 three dispositions, and your scope fields must match.

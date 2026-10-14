@@ -1,61 +1,6 @@
 # Review kit
 
-## WARNING
-
-**A full audit is expensive, and its cost can only be guessed very roughly.** The best guess
-so far, for the *new* tokens an audit sends the model:
-
-```
-new tokens ≈ 520k + 145 × reviewable lines
-```
-
-**That is not what an audit costs you.** New tokens are the uncached input, the cache writes and
-the output. Every agent also re-sends its whole context on each call, and those cache reads are
-93–96% of everything an audit processes: 8–27M tokens for the five Kaggle audits below, against
-0.5–1.1M new. On the API a cache read costs a tenth of the input price or less. Claude Code
-counts cache reads toward plan usage "at the cached token rate", but Anthropic does not publish
-that rate for Pro and Max plans. Priced like the API, the five audits cost about two to four
-times their new tokens, and the larger the repository, the larger the multiple. Until an audit
-has been measured with `/usage`, assume it draws two to four times what the formula says, and
-that one audit can use up a weekly limit: one already has.
-
-**The formula itself is a very rough approximation.** It is a least-squares line through the six
-audits in the table, within about 15% of each. But the per-line term rests almost entirely on
-the one large audit: had that cost 3.0M or 4.0M instead of ~3.5M, the slope would be 120 or
-174. What a repository costs depends on more than its size, and a repository unlike these may
-land further off, in either direction. Small repositories cost close to the fixed part, because
-the protocol itself is expensive; large ones are dominated by the source being read, re-read
-and verified.
-
-| repository | reviewable lines | new tokens | formula | all tokens processed | at API prices, × new |
-|---|---:|---:|---:|---:|---:|
-| Solution A | 693 | 0.53M | 0.62M | 8.4M | 1.9–2.7 |
-| Solution B | 1,397 | 0.80M | 0.72M | 12.0M | 1.9–2.6 |
-| Solution C | 2,921 | 1.09M | 0.94M | 24.6M | 2.4–3.4 |
-| Solution D | 3,744 | 1.04M | 1.06M | 26.9M | 2.5–3.7 |
-| Solution E | 4,794 | 1.10M | 1.22M | 25.1M | 2.3–3.4 |
-| a private repository | 20,259 | ~3.5M | 3.46M | — | — |
-
-The Kaggle rows are from 2026-10-12. *New tokens* is the sum of the harness's figure for each of
-the five agents (four reviewers and the reconciler). That figure is the agent's final context
-size, which matches the new tokens it processed to within a few percent. *All tokens processed*
-counts every API call of those five agents and of the session that ran them, from their
-transcripts. *At API prices* weights cache reads at 0.05× to 0.1× the input price and cache
-writes at 1.25×. The private repository's figure is from an earlier version of the kit, and is
-believed to be the same kind of figure as *new tokens*; nothing else about it is known.
-
-Before it spawns any reviewer, `/repo-audit` shows `review.py estimate`'s reviewable line count
-and token figure, and stops for your go-ahead. Like the formula, that figure counts new tokens
-only. On four of the five Kaggle audits it came within 15% of them, and it overestimated the
-smallest, Solution A, by 61%. It can run low on large repositories: for the 20,259-line one it
-came to about 1.8M, against ~3.5M. Apply the formula to the line count too, and go by the larger
-of the two. To spend less, use `--since <ref>` or run one single-purpose skill (see
-[Run](#run)).
-
-**Used on Linux and WSL only.** The test suite passes on Ubuntu and macOS (CI, Python 3.10 and
-3.14), but no real audit has been run on a Mac. `review.py machine` reads memory from
-`/proc/meminfo`, so on a Mac it reports no memory figure and the compute-budget check has less
-to go on. Native Windows does not work: `machine` calls `os.statvfs`, which Windows lacks.
+**[WARNING: token cost and supported platforms](#warning)**
 
 ## What it is
 
@@ -82,15 +27,12 @@ python3 ~/tools/review-kit/bin/install.py --repo ~/code/some-project
 
 Then **start a new session in that repository** and type `/repo-audit`.
 
-**Two files ever land in your working tree, and you choose both.** Skills go to
+**One file ever lands in your working tree: the review summary,** `REVIEW-SUMMARY.md` or the
+next free name if that one is taken (see below). Skills go to
 `~/.claude/skills/`, the access-log hook to `~/.claude/settings.json`, and every artefact a
-review produces to `~/.review-kit/<repo>-<hash>/`. Inside the repository you get:
-
-- `REVIEW-SUMMARY.md`, written at the end of a run — the deliverable, meant to be committed.
-  Nothing writes it until you have run a review.
-- `REVIEW-RULES.md`, only if you pass `--with-rules`, and never over an existing file.
-
-A plain `install.py --repo <path>` writes nothing into the repository at all.
+review produces to `~/.review-kit/<repo>-<hash>/`. The summary is written at the end of a run —
+the deliverable, meant to be committed — and nothing writes it until you have run a review.
+`install.py --repo <path>` writes nothing into the repository at all.
 
 ### The one rule
 
@@ -112,16 +54,15 @@ it never opened.
 | `~/.claude/settings.json` | one `PostToolUse` hook line, naming no repository |
 | `~/.review-kit/<repo>-<hash>/` | that repository's store and config |
 | `~/.review-kit/installed-skills.json` | which skill names this kit owns |
-| the repository | **nothing** — unless you pass `--with-rules`, which adds `REVIEW-RULES.md`. A run later writes the summary |
+| the repository | **nothing**. A run later writes the summary |
 
 Installing for another repository is the same command with a different `--repo`. It rewrites
 the same global skills and the same hook line — identical both times — and creates a second
 store. The first repository is untouched.
 
 Other flags: `--no-hook` skips the access hook, which makes `review.py audit` unavailable;
-`--with-rules` copies the house-rules template in as `REVIEW-RULES.md`, the one flag that
-writes into the repository, and it never overwrites an existing file. `--uninstall` removes the skills this kit installed and nothing else — your stores,
-summaries and the hook line stay.
+`--uninstall` removes the skills this kit installed and nothing else — your stores, summaries
+and the hook line stay.
 
 ### Two things it cannot promise you
 
@@ -147,7 +88,7 @@ is left out of a review's scope, and reviewers are told not to read it.
 | [`KAGGLE-RESULTS.md`](KAGGLE-RESULTS.md) | what it found in five top-3 and gold-medal Kaggle solutions |
 | [`PRACTICES.md`](PRACTICES.md) | the rule vocabulary findings cite, and an optional default standard |
 | [`FINDINGS.md`](FINDINGS.md) | the JSON contract every reviewer emits |
-| `REVIEW-RULES.template.md` | copied into your repo by `--with-rules`; yours to edit |
+| [`CLAUDE.md.snippet`](CLAUDE.md.snippet) | working rules, and a section for declined and own rules, to paste into your `CLAUDE.md` |
 | [`LICENSE`](LICENSE) | 0BSD: use, copy, modify and distribute it for any purpose, no conditions |
 
 ## Keeping the kit's checkout
@@ -289,57 +230,56 @@ It is the **stable ID vocabulary that findings cite** — `N-13` means the same 
 which is what makes reports comparable and the ledger meaningful. You get that by using the kit,
 and it costs nothing, because it is a naming scheme rather than an instruction.
 
-It is also **a default standard, offered rather than imposed.** Three things make that real
+It is also **a default standard, offered rather than imposed.** Two things make that real
 rather than a claim:
 
-- **The reviewers work against a repository that has adopted none of it.** A finding may carry
-  `rule_id: null`; the contract says so, and says such findings are often the most interesting.
-  They then stand on their evidence, which they were always required to do anyway. Reporting
+- **The reviewers work against a repository that has adopted none of it.** Defect rules are
+  cited whenever one applies, adopted or not, because a leak is a leak; a finding no rule covers
+  carries `rule_id: null`, which the contract calls often the most interesting kind. Reporting
   non-adoption as a defect is explicitly forbidden in every reviewer skill.
-- **Your repository wins.** `CLAUDE.md` takes precedence wherever it disagrees, and a project
-  adds its own rules in the `P-` namespace.
-- **`install.py --with-rules`** drops `REVIEW-RULES.md` into your repo: what you have adopted,
-  what you have *deliberately declined* and why, and your own `P-` rules.
+- **Your repository wins.** `CLAUDE.md` takes precedence wherever it disagrees with
+  `PRACTICES.md`. It is also where a repository declines a rule or adds its own.
 
 ### Where rules come from, and which wins
 
-Three sources, in this precedence order. Every reviewer and the reconciler is told to read them
-in exactly this sequence:
+Two sources, in this precedence order. Every reviewer and the reconciler is told to read them in
+exactly this sequence:
 
 | | file | lives in | who owns it |
 |---|---|---|---|
 | 1 | `CLAUDE.md` | your repository | you — the kit never writes or modifies it |
-| 2 | `REVIEW-RULES.md` | your repository | you, after `--with-rules` copies the template in |
-| 3 | `PRACTICES.md` | the kit | the kit — one copy, shared by every repository it reviews |
+| 2 | `PRACTICES.md` | the kit | the kit — one copy, shared by every repository it reviews |
 
-`CLAUDE.md` is the last word wherever anything disagrees; it holds operational specifics —
-machine names, data locations, submission limits. `REVIEW-RULES.md` holds *standards*: which of
-the kit's rules this repository has adopted. `PRACTICES.md` is the default underneath both, and
-the stable ID vocabulary all three cite.
+`CLAUDE.md` is the last word wherever anything disagrees. Besides operational specifics —
+machine names, data locations, submission limits — it can record two things about standards:
 
-Details worth knowing about `REVIEW-RULES.md`:
+- **Rules you have deliberately declined,** by ID and with the reason. Reviewers are told not to
+  raise a declined rule, and the reconciler drops one that slips through rather than
+  re-litigating it.
+- **Your own rules,** in the `P-` namespace (`P-1`, `P-2`, …), each with the incident or reason
+  behind it. Findings cite them like the kit's own.
 
-- **It is optional and the kit works without it.** No `--with-rules`, no file, no problem —
-  findings then carry `rule_id: null`.
-- **It is copied, never referenced.** The kit does not read its own template back out of your
-  repository, and nothing in `bin/` reads `REVIEW-RULES.md` at all — only the agents do. There
-  is no validation of it and no schema.
-- **`--with-rules` never overwrites.** A repository that already has a `REVIEW-RULES.md` keeps
-  it untouched, and the install says so.
-- **It is yours to commit.** That is why it goes in the repository rather than into the external
-  store: adoption is a team decision, it belongs in version control beside the code it governs,
-  and it should travel to anyone who clones the repo. A copy under `~/` on one machine would be
-  none of those things.
-- **A rule recorded there as declined is not a finding.** Reviewers are told not to raise it,
-  and the reconciler drops one that slips through rather than re-litigating it.
-- **It is reviewed like any other document.** It sits in the review tier, so `review-docs` reads
-  it as prose as well as rules — a rules file that has gone stale is a real defect, and this is
-  how it gets caught. (`REVIEW-SUMMARY*.md` at the root is the one thing `scope` leaves out,
-  because it is the kit's own output rather than yours.)
-- **The template ships blank.** Its adoption table has an empty `adopted?` column and the
-  instruction is to delete the rows that are not true of your repository. Until you edit it, a
-  reviewer cannot tell "we adopted nothing" from "nobody has filled this in" — so fill it in, or
-  delete it, rather than leaving it as shipped.
+[`CLAUDE.md.snippet`](CLAUDE.md.snippet) has a section to paste in for both. Filled in, it reads
+like this:
+
+```markdown
+**Declined** — the kit's rules this repository has considered and rejected, each by ID with the
+reason:
+
+- `D-3` — we use pandas and polars deliberately; the boundary is documented in `io/README.md`.
+
+**Our own rules** — in the `P-` namespace, each with the incident or reason behind it:
+
+- **P-1.** Never write into `data/raw/`. Why: a re-run once overwrote the only copy of an extract.
+```
+
+Keep the reason with every entry. A declined rule with its reason stops the next person from
+re-litigating it, and a rule with its incident attached survives a deadline where a bare
+prohibition does not. Recording nothing is
+fine: the kit works the same on a repository whose `CLAUDE.md` says nothing about review, or
+that has no `CLAUDE.md` at all. Because these rules live in `CLAUDE.md`, they bind every agent
+working in the repository, not only reviewers — which is the point: a rule the team has
+declined should not be followed by the next coding session either.
 
 Roughly forty of the sixty-nine rules describe **defects** — leakage, an unseeded split, a number
 quoted from memory, deserialising an artefact you did not produce. Breaking one means something
@@ -373,8 +313,6 @@ review-kit/
   PRACTICES.md                      portable rules, with stable IDs reviewers cite
   FINDINGS.md                       the JSON contract every reviewer emits
   CLAUDE.md.snippet                 working rules to paste into a project CLAUDE.md
-  REVIEW-RULES.template.md          copied into a repo by install.py --with-rules; the
-                                    repo then owns it — what you adopted, what you declined
   LICENSE                           0BSD: do anything with it, no conditions
   bin/
     review.py                       all the bookkeeping: scope, probe, validate, cluster,
@@ -471,3 +409,60 @@ Be clear-eyed about what this does and does not prove. It shows that a tool call
 file was issued — not that the content was attended to. It is a floor, not a guarantee, and it
 is worth having because the failure it catches (a confident report over files nobody opened) is
 the most dangerous artefact this process can produce.
+
+## WARNING
+
+**A full audit is expensive, and its cost can only be guessed very roughly.** The best guess
+so far, for the *new* tokens an audit sends the model:
+
+```
+new tokens ≈ 520k + 145 × reviewable lines
+```
+
+**That is not what an audit costs you.** New tokens are the uncached input, the cache writes and
+the output. Every agent also re-sends its whole context on each call, and those cache reads are
+93–96% of everything an audit processes: 8–27M tokens for the five Kaggle audits below, against
+0.5–1.1M new. On the API a cache read costs a tenth of the input price or less. Claude Code
+counts cache reads toward plan usage "at the cached token rate", but Anthropic does not publish
+that rate for Pro and Max plans. Priced like the API, the five audits cost about two to four
+times their new tokens, and the larger the repository, the larger the multiple. Until an audit
+has been measured with `/usage`, assume it draws two to four times what the formula says, and
+that one audit can use up a weekly limit: one already has.
+
+**The formula itself is a very rough approximation.** It is a least-squares line through the six
+audits in the table, within about 15% of each. But the per-line term rests almost entirely on
+the one large audit: had that cost 3.0M or 4.0M instead of ~3.5M, the slope would be 120 or
+174. What a repository costs depends on more than its size, and a repository unlike these may
+land further off, in either direction. Small repositories cost close to the fixed part, because
+the protocol itself is expensive; large ones are dominated by the source being read, re-read
+and verified.
+
+| repository | reviewable lines | new tokens | formula | all tokens processed | at API prices, × new |
+|---|---:|---:|---:|---:|---:|
+| Solution A | 693 | 0.53M | 0.62M | 8.4M | 1.9–2.7 |
+| Solution B | 1,397 | 0.80M | 0.72M | 12.0M | 1.9–2.6 |
+| Solution C | 2,921 | 1.09M | 0.94M | 24.6M | 2.4–3.4 |
+| Solution D | 3,744 | 1.04M | 1.06M | 26.9M | 2.5–3.7 |
+| Solution E | 4,794 | 1.10M | 1.22M | 25.1M | 2.3–3.4 |
+| a private repository | 20,259 | ~3.5M | 3.46M | — | — |
+
+The Kaggle rows are from 2026-10-12. *New tokens* is the sum of the harness's figure for each of
+the five agents (four reviewers and the reconciler). That figure is the agent's final context
+size, which matches the new tokens it processed to within a few percent. *All tokens processed*
+counts every API call of those five agents and of the session that ran them, from their
+transcripts. *At API prices* weights cache reads at 0.05× to 0.1× the input price and cache
+writes at 1.25×. The private repository's figure is from an earlier version of the kit, and is
+believed to be the same kind of figure as *new tokens*; nothing else about it is known.
+
+Before it spawns any reviewer, `/repo-audit` shows `review.py estimate`'s reviewable line count
+and token figure, and stops for your go-ahead. Like the formula, that figure counts new tokens
+only. On four of the five Kaggle audits it came within 15% of them, and it overestimated the
+smallest, Solution A, by 61%. It can run low on large repositories: for the 20,259-line one it
+came to about 1.8M, against ~3.5M. Apply the formula to the line count too, and go by the larger
+of the two. To spend less, use `--since <ref>` or run one single-purpose skill (see
+[Run](#run)).
+
+**Used on Linux and WSL only.** The test suite passes on Ubuntu and macOS (CI, Python 3.10 and
+3.14), but no real audit has been run on a Mac. `review.py machine` reads memory from
+`/proc/meminfo`, so on a Mac it reports no memory figure and the compute-budget check has less
+to go on. Native Windows does not work: `machine` calls `os.statvfs`, which Windows lacks.

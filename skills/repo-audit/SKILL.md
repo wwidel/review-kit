@@ -248,10 +248,10 @@ The prompts, in shape — one per reviewer:
 > exactly. Also read `<review-kit>/PRACTICES.md` for the rule IDs you will cite.
 > Scope: the files changed between `<base>` and HEAD, listed below, plus any file they call
 > into. Read each in full.
-> Rules, in order of precedence: the repository's `CLAUDE.md`, then its `REVIEW-RULES.md` if
-> present (what this team adopted, what they declined, their own `P-` rules), then the kit's
-> `PRACTICES.md` as the default. A repository that has adopted nothing is fine — findings then
-> carry `rule_id: null`. Never report non-adoption as a finding.
+> Rules, in order of precedence: the repository's `CLAUDE.md` (including any `P-` rules of its
+> own and any kit rules it declines), then the kit's `PRACTICES.md` as the default. A
+> repository that has adopted nothing is fine. Cite a rule only where one genuinely applies, and
+> never report non-adoption as a finding.
 > The manifest at `<D>/manifest.json` has three tiers: read the review tier in full; the
 > reference tier is described there and is to be queried with a script, never read — list those
 > in `scope.files_queried`. `<D>/probes.json` holds the mechanical checks, already run: treat
@@ -408,7 +408,9 @@ needs them to judge `carryover`. The prohibition applies to the four reviewers o
 Spawn **one** agent, not in parallel with anything:
 
 > Read `<review-kit>/skills/reconcile-reviews/SKILL.md` and follow it exactly. Also read
-> `<review-kit>/FINDINGS.md` and `<review-kit>/PRACTICES.md`.
+> `<review-kit>/FINDINGS.md` and `<review-kit>/PRACTICES.md`, and the repository's `CLAUDE.md`
+> if it has one: it takes precedence over `PRACTICES.md`, and records any rules the team has
+> declined.
 > The findings files are `$STORE/runs/<RUN>/findings-*.json`, already validated and
 > fingerprinted; `findings-static.json` among them holds the static checks' findings, which
 > your skill tells you how to treat. In the same directory: `clusters.json` (corroborated groups, plus proximity

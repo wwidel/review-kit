@@ -184,7 +184,7 @@ So the decision for each confirmed finding is how to present it, not whether to 
 - **`unverifiable`** — you could not settle it anywhere. Say what would.
 
 **Drop**, with a one-line note in the ledger: everything `REFUTED` — and anything raised against
-a rule the repository's `REVIEW-RULES.md` records as *deliberately declined*. That is not a
+a rule the repository's `CLAUDE.md` records as *deliberately declined*. That is not a
 defect, it is a difference of standard, and the team already answered it.
 
 Where you confirm a defect but doubt the remedy, report the defect and say the proposed fix is

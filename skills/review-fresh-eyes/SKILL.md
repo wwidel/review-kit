@@ -113,17 +113,15 @@ which is worth something and is not a substitute. If you have read it, say so in
 
 Read, in this order of precedence:
 
-1. **The repository's `CLAUDE.md`** — operational specifics, and the last word wherever anything
-   disagrees.
-2. **The repository's `REVIEW-RULES.md`**, if it exists — what this team has actually adopted,
-   what they have deliberately declined, and their own `P-` rules. A rule listed there as
-   *declined* is not a finding: do not raise it, and do not re-litigate it.
-3. **The kit's `PRACTICES.md`** — the default, and the stable ID vocabulary you cite.
+1. **The repository's `CLAUDE.md`** — operational specifics, the team's own `P-` rules, and any
+   of the kit's rules the team has deliberately declined. It is the last word wherever anything
+   disagrees. A rule it declines is not a finding: do not raise it, and do not re-litigate it.
+2. **The kit's `PRACTICES.md`** — the default, and the stable ID vocabulary you cite.
 
-If a repository has adopted nothing, that is a supported answer and not a defect in itself. Your
-findings then carry `rule_id: null` and stand on their evidence, which is what the contract has
-always required of them. **Never report "this repo does not follow PRACTICES" as a finding.**
-Report defects; cite a rule only where one genuinely applies.
+If a repository has adopted none of `PRACTICES.md`, that is a supported answer and not a defect
+in itself. **Never report "this repo does not follow PRACTICES" as a finding.** Report defects;
+cite a rule where one genuinely applies, and leave `rule_id: null` where none does. Such findings
+stand on their evidence, which is what the contract has always required of them.
 
 ## Output
 

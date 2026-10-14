@@ -236,16 +236,6 @@ def test_an_existing_summary_is_left_alone_and_a_free_name_claimed(home, repo):
     assert review.summary_name(repo) == "REVIEW-SUMMARY-1.md"
 
 
-def test_with_rules_copies_once_and_never_overwrites(home, repo):
-    assert install(KIT, "--repo", repo, "--with-rules", cwd=repo).returncode == 0
-    rules = repo / "REVIEW-RULES.md"
-    assert rules.read_text() == (KIT / "REVIEW-RULES.template.md").read_text()
-    rules.write_text("ours now\n")
-    r = install(KIT, "--repo", repo, "--with-rules", cwd=repo)
-    assert r.returncode == 0 and "left untouched" in r.stdout
-    assert rules.read_text() == "ours now\n"
-
-
 def test_a_second_repository_leaves_the_first_untouched(home, repo, tmp_path):
     assert install(KIT, "--repo", repo, cwd=repo).returncode == 0
     first = snapshot(home / ".review-kit" / load("review").repo_slug(repo))

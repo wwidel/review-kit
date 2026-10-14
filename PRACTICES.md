@@ -12,15 +12,17 @@ scheme rather than an instruction.
 Second, it is **a default standard for a Python repository built around data analysis and machine
 learning, offered for you to adopt in whole, in part, or not at all.** Nothing here is imposed:
 
-- A finding may carry `rule_id: null`. The contract says so explicitly — *"a finding with no rule
-  is fine and often the most interesting kind"* — so the reviewers work perfectly well against a
-  repository that has adopted none of this. Findings then stand on their evidence, which is what
-  they were always required to do.
+- The reviewers work perfectly well against a repository that has adopted none of this. They
+  cite a rule wherever one applies, adopted or not, and a finding no rule covers carries
+  `rule_id: null` — the contract says so explicitly: *"a finding with no rule is fine and often
+  the most interesting kind"*. Either way a finding stands on its evidence, which is what it was
+  always required to do.
 - **A project's own `CLAUDE.md` takes precedence wherever the two disagree**, and a project adds
   its own rules in the `P-` namespace (`P-1`, `P-2`, …). Your repository wins. Always.
-- `bin/install.py --with-rules` drops a template into your repository where you record which of
-  this you have actually adopted. That file is yours to edit, prune or delete; it is not read
-  from here.
+- **A rule can be declined in `CLAUDE.md`, by ID and with the reason.** A reviewer that knows a
+  rule was considered and rejected stops raising it, and the next person to wonder gets an
+  answer instead of re-litigating it. `CLAUDE.md.snippet` has a section to paste in, and the
+  README's Practices section shows it filled in.
 
 **The two halves of the list.** Roughly forty of these rules describe *defects* — leakage,
 unseeded splits, a number quoted from memory, deserialising an artefact you did not produce.

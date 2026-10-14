@@ -3,9 +3,8 @@
 
 The kit is external to the repository it reviews. Skills go to `~/.claude/skills/`, the
 access-log hook to `~/.claude/settings.json`, and every artefact a review produces to
-`~/.review-kit/<repo>-<hash>/`. A plain install writes nothing inside the repository; only
-`--with-rules` does, placing REVIEW-RULES.md there and never over an existing file. The
-summary is written later, by a run, and is the deliverable.
+`~/.review-kit/<repo>-<hash>/`. An install writes nothing inside the repository. The summary
+is written later, by a run, and is the deliverable.
 
 That is possible because of one rule the kit depends on: **a review runs from a session started
 in the repository being reviewed.** The hook then needs no configuration at all — the directory
@@ -172,15 +171,6 @@ def uninstall_skills():
     return removed, skipped
 
 
-def install_rules(repo: Path):
-    """Copy the house-rules template in, where the repo then owns it. Never overwrites."""
-    dest = repo / "REVIEW-RULES.md"
-    if dest.exists():
-        return dest, False
-    shutil.copyfile(KIT / "REVIEW-RULES.template.md", dest)
-    return dest, True
-
-
 def read_settings() -> dict:
     """The user's settings, or exit 2 before anything is written if they cannot be merged into.
 
@@ -290,10 +280,6 @@ def main():
     ap.add_argument("--repo", default=".", help="repository to review (default: cwd)")
     ap.add_argument("--no-hook", action="store_true",
                     help="skip the access-log hook; `review.py audit` is then unavailable")
-    ap.add_argument("--with-rules", action="store_true",
-                    help="copy the house-rules template into the repo as REVIEW-RULES.md, "
-                         "for you to edit or delete. Never overwrites an existing one. This "
-                         "is the one flag that writes into the repository")
     ap.add_argument("--uninstall", action="store_true",
                     help="remove the skills this kit installed, and nothing else. Stores, "
                          "summaries and the hook line are left alone")
@@ -337,13 +323,6 @@ def main():
               "whichever checkout it should use.")
     print(f"config: {RV.config_path(repo)}")
 
-    if a.with_rules:
-        dest_r, created = install_rules(repo)
-        print(f"\nrules:  {dest_r}" + ("" if created else " — already existed, left untouched"))
-        if created:
-            print("  It is yours — record what you have actually adopted, and delete the rest.")
-            print("  Adopting nothing is a supported answer: findings then carry no rule id.")
-
     if a.no_hook:
         print("\nhook:   skipped (--no-hook). `review.py audit` will refuse to run, so every "
               "reviewer's\n        account of which files it read is taken on trust.")
@@ -359,10 +338,7 @@ def main():
               "/hooks once or restart the\n        session, because the settings watcher may "
               "not pick up a file it did not see at start.")
 
-    if a.with_rules:
-        print(f"\nInside {repo} this install wrote one file: REVIEW-RULES.md.")
-    else:
-        print(f"\nNothing was written inside {repo}.")
+    print(f"\nNothing was written inside {repo}.")
     print(f"The summary will be written to {repo / summary} at the end of a run — a real, "
           "committable file.")
     print("It stays in the repository during a review; reviewers are instructed not to read "
